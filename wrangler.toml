@@ -3,13 +3,10 @@ main = "src/worker/index.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Placeholder bindings — no Cloudflare resources created yet.
-# Replace database_id / bucket_name when provisioning real infrastructure.
-
 [[d1_databases]]
 binding = "AUTODEV_DB"
-database_name = "assayer-autodev-db"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_name = "assayer-autodev"
+database_id = "97565a4b-168b-4e98-aee0-a5c8780edce0"
 migrations_dir = "migrations"
 
 [[r2_buckets]]
@@ -17,8 +14,10 @@ binding = "AUTODEV_EVIDENCE"
 bucket_name = "assayer-autodev-evidence"
 
 [vars]
-ENVIRONMENT = "local"
+ENVIRONMENT = "production"
 
-# Secret binding (required before deployment):
+[secrets]
+required = [ "AUTODEV_SERVICE_TOKEN" ]
+
+# Set the secret value before deployment (never commit values):
 #   wrangler secret put AUTODEV_SERVICE_TOKEN
-# Never store token values in this file or source control.

@@ -53,13 +53,28 @@ src/
 ├── api/
 │   ├── router.ts     # JSON HTTP API
 │   ├── validation.ts
-│   └── middleware/auth.ts  # stub — add auth before deploy
+│   └── middleware/auth.ts  # Bearer auth enforced in createApiRouter
 └── worker/
     └── index.ts      # Cloudflare Worker entry
 migrations/
 └── 0001_initial.sql  # D1 schema
-wrangler.toml         # placeholder bindings (no resources provisioned)
+wrangler.toml         # Worker config (real D1/R2 bindings; no secrets in repo)
 ```
+
+## Cloudflare resources
+
+Dedicated **assayer-autodev** infrastructure has been provisioned in Cloudflare (separate from Assayer production/preview):
+
+| Binding | Resource | Role |
+|---------|----------|------|
+| `AUTODEV_DB` | D1 `assayer-autodev` | Structured durable state |
+| `AUTODEV_EVIDENCE` | R2 `assayer-autodev-evidence` | Evidence blob storage |
+
+`wrangler.toml` references these real bindings. **No secret values, API tokens, or credentials are stored in this repository.**
+
+**Not yet done:** remote D1 migration, Worker deployment, and setting `AUTODEV_SERVICE_TOKEN` in Cloudflare. Local D1 migration can be tested with `--local`; production schema apply uses `--remote` when ready.
+
+`AUTODEV_SERVICE_TOKEN` is required for the final secured deployment. Protected routes fail closed (`503 auth_misconfigured`) if the secret is missing at runtime.
 
 ### D1 vs R2 roles
 
@@ -149,16 +164,23 @@ npm run test
 npm run worker:validate
 ```
 
-Copy `.env.example` to `.env` when provisioning Cloudflare resources later.
+Copy `.env.example` to `.env` for local tooling when needed. Do not commit real credentials.
 
-### D1 migrations (when ready to provision)
+### D1 migrations
 
-After creating a real D1 database and updating `database_id` in `wrangler.toml`:
+The initial schema is in `migrations/0001_initial.sql` (21 tables). Local apply (no remote mutation):
 
 ```bash
-npx wrangler d1 migrations apply assayer-autodev-db --local   # local dev
-npx wrangler d1 migrations apply assayer-autodev-db --remote  # production
+npx wrangler d1 migrations apply assayer-autodev --local
 ```
+
+When ready to apply the same migration to the remote `assayer-autodev` database:
+
+```bash
+npx wrangler d1 migrations apply assayer-autodev --remote
+```
+
+Worker deployment is a separate step after remote migration and secret configuration.
 
 ## What remains intentionally unconnected
 
@@ -167,10 +189,9 @@ npx wrangler d1 migrations apply assayer-autodev-db --remote  # production
 - Playwright browser automation
 - GitHub / GitHub Actions
 - Assayer product integration
-- Cloudflare resource provisioning (placeholder IDs in `wrangler.toml`)
 - Per-role token issuance (V1 uses one service token mapped to admin)
 - Direct-to-R2 presigned/large evidence uploads
-- Production deployment without `AUTODEV_SERVICE_TOKEN`
+- Remote D1 migration and Worker deployment
 
 ## License
 
