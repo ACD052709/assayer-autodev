@@ -19,5 +19,5 @@ ENVIRONMENT = "production"
 [secrets]
 required = [ "AUTODEV_SERVICE_TOKEN" ]
 
-# Set the secret value before deployment (never commit values):
+# Set the secret value before secured deployment (never commit values):
 #   wrangler secret put AUTODEV_SERVICE_TOKEN
