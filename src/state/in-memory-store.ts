@@ -499,7 +499,9 @@ export class InMemoryStateStore implements StateStore {
       ...withStatus("initializing"),
     };
     this.masterStates.set(projectId, state);
-    this.masterInbox.set(projectId, []);
+    if (!this.masterInbox.has(projectId)) {
+      this.masterInbox.set(projectId, []);
+    }
     return state;
   }
 
@@ -517,6 +519,7 @@ export class InMemoryStateStore implements StateStore {
   }
 
   enqueueMasterInboxItem(input: CreateMasterInboxItemInput): MasterInboxItem {
+    this.getOrCreateMasterState(input.projectId);
     const item: MasterInboxItem = {
       id: input.id,
       projectId: input.projectId,
