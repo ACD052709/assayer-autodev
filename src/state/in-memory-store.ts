@@ -1,16 +1,23 @@
 import type {
+  AcceptanceCriterion,
+  Blocker,
   BudgetCategory,
   BudgetCheckResult,
   BudgetEntry,
   BudgetLedger,
+  CreateAcceptanceCriterionInput,
+  CreateBlockerInput,
   CreateBudgetEntryInput,
+  AddBudgetResourceInput,
   CreateDefinitionOfDoneInput,
   CreateDeploymentInput,
   CreateEvidenceInput,
   CreateGitRevisionInput,
   CreateMasterInboxItemInput,
+  CreateMasterRunInput,
   CreatePermissionRequestInput,
   CreateProjectInput,
+  CreateReleaseContractInput,
   CreateRequirementInput,
   CreateTaskDependencyInput,
   CreateTaskInput,
@@ -30,21 +37,28 @@ import type {
   GitRevision,
   InitializeBudgetLedgerInput,
   MasterInboxItem,
+  MasterRun,
   MasterState,
   Permission,
   PermissionRequest,
   Project,
+  ReleaseContract,
   Requirement,
   Task,
   TaskDependency,
   TestCase,
   TestResult,
+  UpdateAcceptanceCriterionInput,
   VerifierRun,
   WorkerEvent,
   WorkerReport,
   WorkerRun,
 } from "../domain/index.js";
 import { createTimestamps, nowIso, touchTimestamps, withStatus } from "../domain/common.js";
+import {
+  BudgetResourceConflictError,
+  limitsForBudgetResource,
+} from "../domain/budget.js";
 import type { StateStore } from "./store.js";
 
 function sumUsage(entries: readonly BudgetEntry[], category: BudgetCategory): number {
@@ -74,6 +88,10 @@ export class InMemoryStateStore implements StateStore {
   private readonly masterInbox = new Map<EntityId, MasterInboxItem[]>();
   private readonly finalAcceptanceRuns = new Map<EntityId, FinalAcceptanceRun>();
   private readonly budgetLedgers = new Map<EntityId, BudgetLedger>();
+  private readonly releaseContracts = new Map<EntityId, ReleaseContract>();
+  private readonly acceptanceCriteria = new Map<EntityId, AcceptanceCriterion>();
+  private readonly blockers = new Map<EntityId, Blocker>();
+  private readonly masterRuns = new Map<EntityId, MasterRun>();
 
   createProject(input: CreateProjectInput): Project {
     const ts = createTimestamps();
@@ -135,6 +153,10 @@ export class InMemoryStateStore implements StateStore {
 
   getDefinitionOfDone(id: EntityId): DefinitionOfDone | undefined {
     return this.definitionsOfDone.get(id);
+  }
+
+  listDefinitionsOfDoneByProject(projectId: EntityId): readonly DefinitionOfDone[] {
+    return [...this.definitionsOfDone.values()].filter((d) => d.projectId === projectId);
   }
 
   createTask(input: CreateTaskInput): Task {
@@ -291,6 +313,10 @@ export class InMemoryStateStore implements StateStore {
     return this.testCases.get(id);
   }
 
+  listTestCasesByProject(projectId: EntityId): readonly TestCase[] {
+    return [...this.testCases.values()].filter((t) => t.projectId === projectId);
+  }
+
   recordTestResult(input: CreateTestResultInput): TestResult {
     const result: TestResult = {
       id: input.id,
@@ -311,6 +337,10 @@ export class InMemoryStateStore implements StateStore {
 
   listTestResultsByCase(testCaseId: EntityId): readonly TestResult[] {
     return this.testResults.get(testCaseId) ?? [];
+  }
+
+  listTestResultsByProject(projectId: EntityId): readonly TestResult[] {
+    return [...this.testResults.values()].flat().filter((r) => r.projectId === projectId);
   }
 
   createEvidence(input: CreateEvidenceInput): Evidence {
@@ -340,6 +370,10 @@ export class InMemoryStateStore implements StateStore {
 
   listEvidenceByTask(taskId: EntityId): readonly Evidence[] {
     return [...this.evidence.values()].filter((e) => e.taskId === taskId);
+  }
+
+  listEvidenceByProject(projectId: EntityId): readonly Evidence[] {
+    return [...this.evidence.values()].filter((e) => e.projectId === projectId);
   }
 
   createPermissionRequest(input: CreatePermissionRequestInput): PermissionRequest {
@@ -486,6 +520,10 @@ export class InMemoryStateStore implements StateStore {
     return this.verifierRuns.get(id);
   }
 
+  listVerifierRunsByProject(projectId: EntityId): readonly VerifierRun[] {
+    return [...this.verifierRuns.values()].filter((r) => r.projectId === projectId);
+  }
+
   getOrCreateMasterState(projectId: EntityId): MasterState {
     const existing = this.masterStates.get(projectId);
     if (existing) {
@@ -579,6 +617,26 @@ export class InMemoryStateStore implements StateStore {
     return this.budgetLedgers.get(projectId);
   }
 
+  addBudgetResource(input: AddBudgetResourceInput): BudgetLedger {
+    const existing = this.budgetLedgers.get(input.projectId);
+    if (existing === undefined) {
+      return this.initializeBudgetLedger({
+        projectId: input.projectId,
+        limits: limitsForBudgetResource(input),
+      });
+    }
+    if (existing.limits.some((limit) => limit.category === input.resourceType)) {
+      throw new BudgetResourceConflictError(input.resourceType);
+    }
+    const updated: BudgetLedger = {
+      ...existing,
+      limits: [...existing.limits, ...limitsForBudgetResource(input)],
+      ...touchTimestamps(existing),
+    };
+    this.budgetLedgers.set(input.projectId, updated);
+    return updated;
+  }
+
   recordBudgetEntry(input: CreateBudgetEntryInput): BudgetEntry {
     const ledger = this.budgetLedgers.get(input.projectId);
     if (!ledger) {
@@ -636,6 +694,131 @@ export class InMemoryStateStore implements StateStore {
     const effectiveLimit = hard ?? soft;
     const remaining = effectiveLimit ? effectiveLimit.maxAmount - usage : Number.POSITIVE_INFINITY;
     return { allowed: true, remaining };
+  }
+
+  createReleaseContract(input: CreateReleaseContractInput): ReleaseContract {
+    const contract: ReleaseContract = {
+      id: input.id,
+      projectId: input.projectId,
+      version: input.version,
+      requiredEvidenceKinds: input.requiredEvidenceKinds,
+      requiredEvidenceLabels: input.requiredEvidenceLabels ?? [],
+      ...(input.notes !== undefined ? { notes: input.notes } : {}),
+      ...createTimestamps(),
+    };
+    this.releaseContracts.set(contract.id, contract);
+    return contract;
+  }
+
+  getReleaseContract(id: EntityId): ReleaseContract | undefined {
+    return this.releaseContracts.get(id);
+  }
+
+  getLatestReleaseContract(projectId: EntityId): ReleaseContract | undefined {
+    return [...this.releaseContracts.values()]
+      .filter((c) => c.projectId === projectId)
+      .sort((a, b) => b.version - a.version || b.createdAt.localeCompare(a.createdAt))[0];
+  }
+
+  createAcceptanceCriterion(input: CreateAcceptanceCriterionInput): AcceptanceCriterion {
+    const criterion: AcceptanceCriterion = {
+      id: input.id,
+      projectId: input.projectId,
+      releaseContractId: input.releaseContractId,
+      description: input.description,
+      requirementIds: input.requirementIds ?? [],
+      applicable: input.applicable ?? true,
+      evidenceIds: [],
+      ...createTimestamps(),
+      ...withStatus("pending"),
+    };
+    this.acceptanceCriteria.set(criterion.id, criterion);
+    return criterion;
+  }
+
+  updateAcceptanceCriterion(input: UpdateAcceptanceCriterionInput): AcceptanceCriterion {
+    const existing = this.acceptanceCriteria.get(input.id);
+    if (!existing) {
+      throw new Error(`AcceptanceCriterion not found: ${input.id}`);
+    }
+    const updated: AcceptanceCriterion = {
+      ...existing,
+      ...withStatus(input.status),
+      ...(input.evidenceIds !== undefined ? { evidenceIds: input.evidenceIds } : {}),
+      ...touchTimestamps(existing),
+    };
+    this.acceptanceCriteria.set(input.id, updated);
+    return updated;
+  }
+
+  listAcceptanceCriteriaByProject(projectId: EntityId): readonly AcceptanceCriterion[] {
+    return [...this.acceptanceCriteria.values()].filter((c) => c.projectId === projectId);
+  }
+
+  createBlocker(input: CreateBlockerInput): Blocker {
+    const blocker: Blocker = {
+      id: input.id,
+      projectId: input.projectId,
+      kind: input.kind,
+      summary: input.summary,
+      ...(input.details !== undefined ? { details: input.details } : {}),
+      ...(input.relatedEntityId !== undefined ? { relatedEntityId: input.relatedEntityId } : {}),
+      ...createTimestamps(),
+      ...withStatus("open"),
+    };
+    this.blockers.set(blocker.id, blocker);
+    return blocker;
+  }
+
+  resolveBlocker(blockerId: EntityId): Blocker {
+    const existing = this.blockers.get(blockerId);
+    if (!existing) {
+      throw new Error(`Blocker not found: ${blockerId}`);
+    }
+    const updated: Blocker = {
+      ...existing,
+      ...withStatus("resolved"),
+      ...touchTimestamps(existing),
+    };
+    this.blockers.set(blockerId, updated);
+    return updated;
+  }
+
+  listBlockersByProject(projectId: EntityId): readonly Blocker[] {
+    return [...this.blockers.values()].filter((b) => b.projectId === projectId);
+  }
+
+  createMasterRun(input: CreateMasterRunInput): MasterRun {
+    const run: MasterRun = {
+      id: input.id,
+      projectId: input.projectId,
+      proposedAction: input.proposedAction,
+      enforcedAction: input.enforcedAction,
+      rationale: input.rationale,
+      finishedBlockedReasons: input.finishedBlockedReasons ?? [],
+      createdTaskIds: input.createdTaskIds ?? [],
+      promptVersion: input.promptVersion,
+      model: input.model,
+      ...(input.trigger !== undefined ? { trigger: input.trigger } : {}),
+      ...(input.context !== undefined ? { context: input.context } : {}),
+      ...(input.inputTokens !== undefined ? { inputTokens: input.inputTokens } : {}),
+      ...(input.outputTokens !== undefined ? { outputTokens: input.outputTokens } : {}),
+      ...(input.estimatedCost !== undefined ? { estimatedCost: input.estimatedCost } : {}),
+      ...createTimestamps(),
+      ...withStatus(input.status),
+    };
+    this.masterRuns.set(run.id, run);
+    return run;
+  }
+
+  getMasterRun(id: EntityId): MasterRun | undefined {
+    return this.masterRuns.get(id);
+  }
+
+  listMasterRunsByProject(projectId: EntityId): readonly MasterRun[] {
+    return [...this.masterRuns.values()]
+      .filter((r) => r.projectId === projectId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 }
 

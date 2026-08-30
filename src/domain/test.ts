@@ -1,6 +1,6 @@
 import type { EntityId, Provenance, StatusRecord, Timestamps, VerificationOutcome } from "./common.js";
 
-export type TestCaseKind = "unit" | "integration" | "browser" | "acceptance";
+export type TestCaseKind = "unit" | "integration" | "browser" | "acceptance" | "regression";
 
 export interface TestCase extends Timestamps, StatusRecord<"active" | "disabled">, Provenance {
   readonly id: EntityId;

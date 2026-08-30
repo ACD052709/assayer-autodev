@@ -1,8 +1,11 @@
 import type {
+  AcceptanceCriterionStatus,
+  BlockerKind,
   BudgetCategory,
   BudgetLimitKind,
   DeploymentStatus,
   EvidenceKind,
+  MasterAction,
   MasterInboxItemKind,
   MasterPhase,
   PermissionDecision,
@@ -28,11 +31,11 @@ const TASK_STATUSES = new Set<TaskStatus>([
   "awaiting_verification", "completed", "failed", "cancelled",
 ]);
 const TASK_KINDS = new Set<TaskKind>(["planning", "implementation", "verification", "deployment", "acceptance"]);
+const TEST_CASE_KINDS = new Set<TestCaseKind>(["unit", "integration", "browser", "acceptance", "regression"]);
 const WORKER_KINDS = new Set<WorkerKind>(["cursor_acp", "playwright", "verifier", "generic"]);
 const WORKER_RUN_STATUSES = new Set<WorkerRunStatus>(["queued", "running", "succeeded", "failed", "cancelled", "timed_out"]);
 const WORKER_EVENT_TYPES = new Set<WorkerEventType>(["started", "log", "artifact", "progress", "error", "completed"]);
 const WORKER_REPORT_OUTCOMES = new Set(["success", "failure", "partial"]);
-const TEST_CASE_KINDS = new Set<TestCaseKind>(["unit", "integration", "browser", "acceptance"]);
 const VERIFICATION_OUTCOMES = new Set<VerificationOutcome>(["PASS", "FAIL", "INCONCLUSIVE"]);
 const EVIDENCE_KINDS = new Set<EvidenceKind>(["screenshot", "log", "artifact", "report", "diff", "other"]);
 const PERMISSION_SCOPES = new Set<PermissionScope>(["filesystem", "network", "git", "deployment", "external_api", "cost"]);
@@ -42,10 +45,34 @@ const MASTER_PHASES = new Set<MasterPhase>([
   "initializing", "planning", "executing", "verifying", "accepting", "paused", "completed", "failed",
 ]);
 const MASTER_INBOX_KINDS = new Set<MasterInboxItemKind>([
-  "worker_report", "verification_result", "permission_request", "budget_alert", "task_update", "human_message",
+  "worker_report", "verification_result", "permission_request", "budget_alert", "task_update", "human_message", "master_decision",
 ]);
 const BUDGET_CATEGORIES = new Set<BudgetCategory>(["llm_tokens", "compute", "browser_minutes", "storage", "other"]);
 const BUDGET_LIMIT_KINDS = new Set<BudgetLimitKind>(["soft", "hard"]);
+const MASTER_ACTIONS = new Set<MasterAction>([
+  "CREATE_TASKS",
+  "WAIT_FOR_WORKERS",
+  "REQUEST_VERIFICATION",
+  "REQUEST_HUMAN_APPROVAL",
+  "REPLAN",
+  "FINAL_ACCEPTANCE",
+  "FINISHED",
+  "BLOCKED",
+]);
+const ACCEPTANCE_CRITERION_STATUSES = new Set<AcceptanceCriterionStatus>([
+  "pending",
+  "PASS",
+  "FAIL",
+  "not_applicable",
+]);
+const BLOCKER_KINDS = new Set<BlockerKind>([
+  "requirement",
+  "verification",
+  "budget",
+  "permission",
+  "dependency",
+  "other",
+]);
 
 export function assertEntityId(value: unknown, field: string): string {
   if (typeof value !== "string" || !ENTITY_ID_PATTERN.test(value)) {
@@ -107,6 +134,9 @@ export const validators = {
   masterInboxKind: (v: unknown, f: string) => assertEnum(v, f, MASTER_INBOX_KINDS),
   budgetCategory: (v: unknown, f: string) => assertEnum(v, f, BUDGET_CATEGORIES),
   budgetLimitKind: (v: unknown, f: string) => assertEnum(v, f, BUDGET_LIMIT_KINDS),
+  masterAction: (v: unknown, f: string) => assertEnum(v, f, MASTER_ACTIONS),
+  acceptanceCriterionStatus: (v: unknown, f: string) => assertEnum(v, f, ACCEPTANCE_CRITERION_STATUSES),
+  blockerKind: (v: unknown, f: string) => assertEnum(v, f, BLOCKER_KINDS),
 };
 
 export function rejectUnknownKeys(body: Record<string, unknown>, allowed: readonly string[]): void {

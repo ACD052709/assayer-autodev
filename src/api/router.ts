@@ -2,6 +2,14 @@ import type { AsyncStateStore } from "../state/async-store.js";
 import type { WorkerReport } from "../domain/index.js";
 import type { EvidenceBlobStore } from "../evidence/index.js";
 import { evidenceBlobKey } from "../evidence/index.js";
+import type { MasterOrchestrator } from "../master/index.js";
+import { MasterModelConfigError } from "../master/index.js";
+import {
+  BudgetResourceConflictError,
+  expectedBudgetUnit,
+  listBudgetResourceViews,
+  toBudgetResourceView,
+} from "../domain/budget.js";
 import type { AuthConfig } from "./auth/index.js";
 import {
   assertCallerPermitted,
@@ -34,6 +42,7 @@ import {
 export interface ApiDependencies {
   store: AsyncStateStore;
   blobs: EvidenceBlobStore;
+  masterOrchestrator?: MasterOrchestrator;
 }
 
 export interface ApiRouterOptions {
@@ -61,16 +70,20 @@ function assertOptionalNonEmptyString(value: unknown, field: string): string | u
   return assertNonEmptyString(value, field);
 }
 
-function assertOptionalNumber(value: unknown, field: string): number | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
+function assertFiniteNumber(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new ApiError(400, "validation_error", `Invalid ${field}`, [
       { field, message: "Must be a finite number" },
     ]);
   }
   return value;
+}
+
+function assertOptionalNumber(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return assertFiniteNumber(value, field);
 }
 
 function assertOptionalObject(value: unknown, field: string): Record<string, unknown> | undefined {
@@ -90,6 +103,27 @@ function assertEntityIdArray(value: unknown, field: string): readonly string[] |
     ]);
   }
   return value.map((item, index) => assertEntityId(item, `${field}[${index}]`));
+}
+
+function assertOptionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "boolean") {
+    throw new ApiError(400, "validation_error", `Invalid ${field}`, [
+      { field, message: "Must be a boolean" },
+    ]);
+  }
+  return value;
+}
+
+function assertStringArray(value: unknown, field: string): readonly string[] {
+  if (!Array.isArray(value)) {
+    throw new ApiError(400, "validation_error", `Invalid ${field}`, [
+      { field, message: "Must be an array" },
+    ]);
+  }
+  return value.map((item, index) => assertNonEmptyString(item, `${field}[${index}]`));
 }
 
 function assertNumberRecord(value: unknown, field: string): Record<string, number> | undefined {
@@ -481,6 +515,227 @@ async function handlePostMasterInbox(request: Request, deps: ApiDependencies): P
   return jsonResponse({ item }, 201);
 }
 
+async function handlePostMasterRun(
+  request: Request,
+  deps: ApiDependencies,
+): Promise<Response> {
+  if (deps.masterOrchestrator === undefined) {
+    throw new ApiError(503, "master_misconfigured", "Master orchestrator is not configured");
+  }
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, ["projectId", "trigger", "context"]);
+  const projectId = assertEntityId(body.projectId, "projectId");
+  await requireProject(deps.store, projectId);
+  const trigger = assertOptionalNonEmptyString(body.trigger, "trigger");
+  const context = assertOptionalNonEmptyString(body.context, "context");
+  try {
+    const run = await deps.masterOrchestrator.run({
+      projectId,
+      ...(trigger !== undefined ? { trigger } : {}),
+      ...(context !== undefined ? { context } : {}),
+    });
+    return jsonResponse({ run }, 201);
+  } catch (error) {
+    if (error instanceof MasterModelConfigError) {
+      throw new ApiError(503, "openai_misconfigured", "OpenAI master client is not configured");
+    }
+    throw error;
+  }
+}
+
+async function handleGetMasterRuns(request: Request, deps: ApiDependencies): Promise<Response> {
+  const url = new URL(request.url);
+  const projectId = assertEntityId(url.searchParams.get("projectId"), "projectId");
+  await requireProject(deps.store, projectId);
+  const runs = await deps.store.listMasterRunsByProject(projectId);
+  return jsonResponse({ runs });
+}
+
+async function handleGetMasterRun(
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const runId = assertEntityId(params.runId, "runId");
+  const run = await deps.store.getMasterRun(runId);
+  if (run === undefined) {
+    throw new ApiError(404, "not_found", `Master run not found: ${runId}`);
+  }
+  return jsonResponse({ run });
+}
+
+async function handlePostReleaseContract(
+  request: Request,
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const projectId = assertEntityId(params.projectId, "projectId");
+  await requireProject(deps.store, projectId);
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, [
+    "id",
+    "version",
+    "requiredEvidenceKinds",
+    "requiredEvidenceLabels",
+    "notes",
+    "acceptanceCriteria",
+  ]);
+  const version = assertOptionalNumber(body.version, "version") ?? 1;
+  if (!Number.isInteger(version) || version < 1) {
+    throw new ApiError(400, "validation_error", "Invalid version", [
+      { field: "version", message: "Must be a positive integer" },
+    ]);
+  }
+  const requiredEvidenceKinds = assertStringArray(body.requiredEvidenceKinds, "requiredEvidenceKinds").map(
+    (kind, index) => validators.evidenceKind(kind, `requiredEvidenceKinds[${index}]`),
+  );
+  const labelsRaw = body.requiredEvidenceLabels;
+  const requiredEvidenceLabels =
+    labelsRaw === undefined || labelsRaw === null
+      ? undefined
+      : assertStringArray(labelsRaw, "requiredEvidenceLabels");
+  const notes = assertOptionalNonEmptyString(body.notes, "notes");
+
+  const contract = await deps.store.createReleaseContract({
+    id: assertEntityId(body.id, "id"),
+    projectId,
+    version,
+    requiredEvidenceKinds,
+    ...(requiredEvidenceLabels !== undefined ? { requiredEvidenceLabels } : {}),
+    ...(notes !== undefined ? { notes } : {}),
+  });
+
+  const criteriaInput = body.acceptanceCriteria;
+  if (criteriaInput !== undefined && criteriaInput !== null) {
+    if (!Array.isArray(criteriaInput)) {
+      throw new ApiError(400, "validation_error", "Invalid acceptanceCriteria", [
+        { field: "acceptanceCriteria", message: "Must be an array" },
+      ]);
+    }
+    for (const [index, raw] of criteriaInput.entries()) {
+      const item = assertObject(raw, `acceptanceCriteria[${index}]`);
+      rejectUnknownKeys(item, ["id", "description", "requirementIds", "applicable"]);
+      const applicable = assertOptionalBoolean(item.applicable, `acceptanceCriteria[${index}].applicable`);
+      const requirementIds = assertEntityIdArray(
+        item.requirementIds,
+        `acceptanceCriteria[${index}].requirementIds`,
+      );
+      await deps.store.createAcceptanceCriterion({
+        id: assertEntityId(item.id, `acceptanceCriteria[${index}].id`),
+        projectId,
+        releaseContractId: contract.id,
+        description: assertNonEmptyString(item.description, `acceptanceCriteria[${index}].description`),
+        ...(requirementIds !== undefined ? { requirementIds } : {}),
+        ...(applicable !== undefined ? { applicable } : {}),
+      });
+    }
+  }
+
+  const acceptanceCriteria = (await deps.store.listAcceptanceCriteriaByProject(projectId)).filter(
+    (c) => c.releaseContractId === contract.id,
+  );
+  const blockers = await deps.store.listBlockersByProject(projectId);
+  return jsonResponse({ contract, acceptanceCriteria, blockers }, 201);
+}
+
+async function handleGetReleaseContract(
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const projectId = assertEntityId(params.projectId, "projectId");
+  await requireProject(deps.store, projectId);
+  const contract = await deps.store.getLatestReleaseContract(projectId);
+  if (contract === undefined) {
+    throw new ApiError(404, "not_found", `Release contract not found for project: ${projectId}`);
+  }
+  const acceptanceCriteria = (await deps.store.listAcceptanceCriteriaByProject(projectId)).filter(
+    (c) => c.releaseContractId === contract.id,
+  );
+  const blockers = await deps.store.listBlockersByProject(projectId);
+  return jsonResponse({ contract, acceptanceCriteria, blockers });
+}
+
+async function handlePostProjectBudget(
+  request: Request,
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const projectId = assertEntityId(params.projectId, "projectId");
+  await requireProject(deps.store, projectId);
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, ["resourceType", "hardLimit", "softLimit", "unit"]);
+  const resourceType = validators.budgetCategory(body.resourceType, "resourceType");
+  const unit = assertNonEmptyString(body.unit, "unit");
+  if (unit !== expectedBudgetUnit(resourceType)) {
+    throw new ApiError(400, "validation_error", "Invalid unit", [
+      { field: "unit", message: `Must be ${expectedBudgetUnit(resourceType)} for ${resourceType}` },
+    ]);
+  }
+  const hardLimit = assertFiniteNumber(body.hardLimit, "hardLimit");
+  if (hardLimit <= 0) {
+    throw new ApiError(400, "validation_error", "Invalid hardLimit", [
+      { field: "hardLimit", message: "Must be greater than 0" },
+    ]);
+  }
+  const softLimit = assertOptionalNumber(body.softLimit, "softLimit");
+  if (softLimit !== undefined && (softLimit < 0 || softLimit > hardLimit)) {
+    throw new ApiError(400, "validation_error", "Invalid softLimit", [
+      { field: "softLimit", message: "Must be >= 0 and <= hardLimit" },
+    ]);
+  }
+
+  try {
+    const ledger = await deps.store.addBudgetResource({
+      projectId,
+      resourceType,
+      hardLimit,
+      unit,
+      ...(softLimit !== undefined ? { softLimit } : {}),
+    });
+    const budget = toBudgetResourceView(ledger, resourceType);
+    return jsonResponse({ budget }, 201);
+  } catch (error) {
+    if (error instanceof BudgetResourceConflictError) {
+      throw new ApiError(409, "conflict", "Budget already exists for this resource type");
+    }
+    throw error;
+  }
+}
+
+async function handleGetProjectBudgets(
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const projectId = assertEntityId(params.projectId, "projectId");
+  await requireProject(deps.store, projectId);
+  const ledger = await deps.store.getBudgetLedger(projectId);
+  const budgets = ledger === undefined ? [] : listBudgetResourceViews(ledger);
+  return jsonResponse({ budgets });
+}
+
+async function handleGetProjectBudget(
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const projectId = assertEntityId(params.projectId, "projectId");
+  const budgetId = assertEntityId(params.budgetId, "budgetId");
+  await requireProject(deps.store, projectId);
+  const ledger = await deps.store.getBudgetLedger(projectId);
+  if (ledger === undefined) {
+    throw new ApiError(404, "not_found", `Budget not found: ${budgetId}`);
+  }
+  let resourceType: ReturnType<typeof validators.budgetCategory>;
+  try {
+    resourceType = validators.budgetCategory(budgetId, "budgetId");
+  } catch {
+    throw new ApiError(404, "not_found", `Budget not found: ${budgetId}`);
+  }
+  const budget = toBudgetResourceView(ledger, resourceType);
+  if (budget === undefined) {
+    throw new ApiError(404, "not_found", `Budget not found: ${budgetId}`);
+  }
+  return jsonResponse({ budget });
+}
+
 const routes: readonly {
   method: string;
   pattern: string;
@@ -577,6 +832,54 @@ const routes: readonly {
     pattern: "/api/master/inbox",
     policy: INBOX_WRITE_POLICY,
     handler: (request, _params, deps) => handlePostMasterInbox(request, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/master/run",
+    policy: MASTER_WRITE_POLICY,
+    handler: (request, _params, deps) => handlePostMasterRun(request, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/master/runs",
+    policy: READ_POLICY,
+    handler: (request, _params, deps) => handleGetMasterRuns(request, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/master/runs/:runId",
+    policy: READ_POLICY,
+    handler: (_request, params, deps) => handleGetMasterRun(params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:projectId/release-contract",
+    policy: MASTER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostReleaseContract(request, params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:projectId/release-contract",
+    policy: READ_POLICY,
+    handler: (_request, params, deps) => handleGetReleaseContract(params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:projectId/budgets",
+    policy: MASTER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostProjectBudget(request, params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:projectId/budgets",
+    policy: READ_POLICY,
+    handler: (_request, params, deps) => handleGetProjectBudgets(params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:projectId/budgets/:budgetId",
+    policy: READ_POLICY,
+    handler: (_request, params, deps) => handleGetProjectBudget(params, deps),
   },
 ];
 

@@ -1,15 +1,21 @@
 import type {
+  AcceptanceCriterion,
+  Blocker,
   BudgetEntry,
   BudgetLedger,
   BudgetLimit,
+  CreateAcceptanceCriterionInput,
+  CreateBlockerInput,
   CreateBudgetEntryInput,
   CreateDefinitionOfDoneInput,
   CreateDeploymentInput,
   CreateEvidenceInput,
   CreateGitRevisionInput,
   CreateMasterInboxItemInput,
+  CreateMasterRunInput,
   CreatePermissionRequestInput,
   CreateProjectInput,
+  CreateReleaseContractInput,
   CreateRequirementInput,
   CreateTaskDependencyInput,
   CreateTaskInput,
@@ -29,15 +35,18 @@ import type {
   GitRevision,
   InitializeBudgetLedgerInput,
   MasterInboxItem,
+  MasterRun,
   MasterState,
   Permission,
   PermissionRequest,
   Project,
+  ReleaseContract,
   Requirement,
   Task,
   TaskDependency,
   TestCase,
   TestResult,
+  UpdateAcceptanceCriterionInput,
   VerifierRun,
   WorkerEvent,
   WorkerReport,
@@ -58,6 +67,7 @@ export interface StateStore {
 
   createDefinitionOfDone(input: CreateDefinitionOfDoneInput): DefinitionOfDone;
   getDefinitionOfDone(id: EntityId): DefinitionOfDone | undefined;
+  listDefinitionsOfDoneByProject(projectId: EntityId): readonly DefinitionOfDone[];
 
   // Tasks
   createTask(input: CreateTaskInput): Task;
@@ -86,14 +96,17 @@ export interface StateStore {
   // Tests
   createTestCase(input: CreateTestCaseInput): TestCase;
   getTestCase(id: EntityId): TestCase | undefined;
+  listTestCasesByProject(projectId: EntityId): readonly TestCase[];
 
   recordTestResult(input: CreateTestResultInput): TestResult;
   listTestResultsByCase(testCaseId: EntityId): readonly TestResult[];
+  listTestResultsByProject(projectId: EntityId): readonly TestResult[];
 
   // Evidence
   createEvidence(input: CreateEvidenceInput): Evidence;
   getEvidence(id: EntityId): Evidence | undefined;
   listEvidenceByTask(taskId: EntityId): readonly Evidence[];
+  listEvidenceByProject(projectId: EntityId): readonly Evidence[];
 
   // Permissions
   createPermissionRequest(input: CreatePermissionRequestInput): PermissionRequest;
@@ -112,6 +125,7 @@ export interface StateStore {
   createVerifierRun(input: CreateVerifierRunInput): VerifierRun;
   completeVerifierRun(input: CompleteVerifierRunInput): VerifierRun;
   getVerifierRun(id: EntityId): VerifierRun | undefined;
+  listVerifierRunsByProject(projectId: EntityId): readonly VerifierRun[];
 
   // Master director
   getOrCreateMasterState(projectId: EntityId): MasterState;
@@ -129,6 +143,24 @@ export interface StateStore {
   // Budget
   initializeBudgetLedger(input: InitializeBudgetLedgerInput): BudgetLedger;
   getBudgetLedger(projectId: EntityId): BudgetLedger | undefined;
+  addBudgetResource(input: import("../domain/budget.js").AddBudgetResourceInput): BudgetLedger;
   recordBudgetEntry(input: CreateBudgetEntryInput): BudgetEntry;
   checkBudget(projectId: EntityId, category: BudgetLimit["category"]): import("../domain/budget.js").BudgetCheckResult;
+
+  // Master AI / release contract
+  createReleaseContract(input: CreateReleaseContractInput): ReleaseContract;
+  getReleaseContract(id: EntityId): ReleaseContract | undefined;
+  getLatestReleaseContract(projectId: EntityId): ReleaseContract | undefined;
+
+  createAcceptanceCriterion(input: CreateAcceptanceCriterionInput): AcceptanceCriterion;
+  updateAcceptanceCriterion(input: UpdateAcceptanceCriterionInput): AcceptanceCriterion;
+  listAcceptanceCriteriaByProject(projectId: EntityId): readonly AcceptanceCriterion[];
+
+  createBlocker(input: CreateBlockerInput): Blocker;
+  resolveBlocker(blockerId: EntityId): Blocker;
+  listBlockersByProject(projectId: EntityId): readonly Blocker[];
+
+  createMasterRun(input: CreateMasterRunInput): MasterRun;
+  getMasterRun(id: EntityId): MasterRun | undefined;
+  listMasterRunsByProject(projectId: EntityId): readonly MasterRun[];
 }

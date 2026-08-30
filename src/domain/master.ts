@@ -6,7 +6,8 @@ export type MasterInboxItemKind =
   | "permission_request"
   | "budget_alert"
   | "task_update"
-  | "human_message";
+  | "human_message"
+  | "master_decision";
 
 export type MasterInboxItemStatus = "unread" | "acknowledged" | "processed" | "archived";
 

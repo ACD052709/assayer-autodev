@@ -9,4 +9,5 @@ export * from "./permission.js";
 export * from "./git.js";
 export * from "./verifier.js";
 export * from "./master.js";
+export * from "./master-ai.js";
 export * from "./budget.js";

@@ -149,4 +149,68 @@ describe("D1StateStore", () => {
     const sorted = [...items].sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
     expect(sorted[1]!.receivedAt >= sorted[0]!.receivedAt).toBe(true);
   });
+
+  it("persists release contracts, blockers, and master runs", async () => {
+    await store.createProject({ id: projectId, name: "P", description: "P" });
+    const contract = await store.createReleaseContract({
+      id: "rc-d1",
+      projectId,
+      version: 1,
+      requiredEvidenceKinds: ["log"],
+    });
+    await store.createAcceptanceCriterion({
+      id: "ac-d1",
+      projectId,
+      releaseContractId: contract.id,
+      description: "Done",
+    });
+    await store.createBlocker({
+      id: "blk-d1",
+      projectId,
+      kind: "verification",
+      summary: "Need logs",
+    });
+    const run = await store.createMasterRun({
+      id: "mrun-d1",
+      projectId,
+      proposedAction: "FINISHED",
+      enforcedAction: "BLOCKED",
+      rationale: "Gate failed",
+      finishedBlockedReasons: ["unresolved_blockers"],
+      promptVersion: "master-system-v1",
+      model: "none",
+      status: "blocked",
+    });
+    expect((await store.getLatestReleaseContract(projectId))?.id).toBe("rc-d1");
+    expect(await store.listAcceptanceCriteriaByProject(projectId)).toHaveLength(1);
+    expect(await store.listBlockersByProject(projectId)).toHaveLength(1);
+    expect((await store.getMasterRun(run.id))?.enforcedAction).toBe("BLOCKED");
+    expect(await store.listMasterRunsByProject(projectId)).toHaveLength(1);
+  });
+
+  it("adds budget resources without a new schema and rejects duplicates", async () => {
+    await store.createProject({ id: projectId, name: "P", description: "P" });
+    const first = await store.addBudgetResource({
+      projectId,
+      resourceType: "llm_tokens",
+      hardLimit: 1000,
+      unit: "tokens",
+    });
+    expect(first.limits).toHaveLength(1);
+    await expect(
+      store.addBudgetResource({
+        projectId,
+        resourceType: "llm_tokens",
+        hardLimit: 2000,
+        unit: "tokens",
+      }),
+    ).rejects.toMatchObject({ name: "BudgetResourceConflictError" });
+    const withCompute = await store.addBudgetResource({
+      projectId,
+      resourceType: "compute",
+      hardLimit: 30,
+      unit: "minutes",
+    });
+    expect(withCompute.limits.some((limit) => limit.category === "compute")).toBe(true);
+  });
 });

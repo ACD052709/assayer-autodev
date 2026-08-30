@@ -1,18 +1,25 @@
 import type { D1Database } from "@cloudflare/workers-types";
 import type {
+  AcceptanceCriterion,
+  Blocker,
   BudgetCategory,
   BudgetCheckResult,
   BudgetEntry,
   BudgetLedger,
   BudgetLimit,
+  CreateAcceptanceCriterionInput,
+  CreateBlockerInput,
   CreateBudgetEntryInput,
+  AddBudgetResourceInput,
   CreateDefinitionOfDoneInput,
   CreateDeploymentInput,
   CreateEvidenceInput,
   CreateGitRevisionInput,
   CreateMasterInboxItemInput,
+  CreateMasterRunInput,
   CreatePermissionRequestInput,
   CreateProjectInput,
+  CreateReleaseContractInput,
   CreateRequirementInput,
   CreateTaskDependencyInput,
   CreateTaskInput,
@@ -29,25 +36,35 @@ import type {
   Deployment,
   EntityId,
   Evidence,
+  EvidenceKind,
   FinalAcceptanceRun,
   GitRevision,
   InitializeBudgetLedgerInput,
+  MasterAction,
   MasterInboxItem,
+  MasterRun,
+  MasterRunStatus,
   MasterState,
   Permission,
   PermissionRequest,
   Project,
+  ReleaseContract,
   Requirement,
   Task,
   TaskDependency,
   TestCase,
   TestResult,
+  UpdateAcceptanceCriterionInput,
   VerifierRun,
   WorkerEvent,
   WorkerReport,
   WorkerRun,
 } from "../domain/index.js";
 import { createTimestamps, nowIso, touchTimestamps, withStatus } from "../domain/common.js";
+import {
+  BudgetResourceConflictError,
+  limitsForBudgetResource,
+} from "../domain/budget.js";
 import type { AsyncStateStore } from "./async-store.js";
 import {
   optionalNumber,
@@ -298,6 +315,65 @@ interface BudgetEntryRow {
   task_id: string | null;
   worker_run_id: string | null;
   description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ReleaseContractRow {
+  id: string;
+  project_id: string;
+  version: number;
+  required_evidence_kinds_json: string;
+  required_evidence_labels_json: string;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface AcceptanceCriterionRow {
+  id: string;
+  project_id: string;
+  release_contract_id: string;
+  description: string;
+  requirement_ids_json: string;
+  applicable: number;
+  status: string;
+  status_changed_at: string;
+  evidence_ids_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface BlockerRow {
+  id: string;
+  project_id: string;
+  kind: string;
+  summary: string;
+  details: string | null;
+  related_entity_id: string | null;
+  status: string;
+  status_changed_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MasterRunRow {
+  id: string;
+  project_id: string;
+  trigger: string | null;
+  context: string | null;
+  proposed_action: string;
+  enforced_action: string;
+  rationale: string;
+  finished_blocked_reasons_json: string;
+  created_task_ids_json: string;
+  prompt_version: string;
+  model: string;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  estimated_cost: number | null;
+  status: string;
+  status_changed_at: string;
   created_at: string;
   updated_at: string;
 }
@@ -614,6 +690,81 @@ function rowToBudgetEntry(row: BudgetEntryRow): BudgetEntry {
   };
 }
 
+function rowToReleaseContract(row: ReleaseContractRow): ReleaseContract {
+  const notes = optionalString(row.notes);
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    version: row.version,
+    requiredEvidenceKinds: parseJsonArray<EvidenceKind>(row.required_evidence_kinds_json),
+    requiredEvidenceLabels: parseJsonArray<string>(row.required_evidence_labels_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...(notes !== undefined ? { notes } : {}),
+  };
+}
+
+function rowToAcceptanceCriterion(row: AcceptanceCriterionRow): AcceptanceCriterion {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    releaseContractId: row.release_contract_id,
+    description: row.description,
+    requirementIds: parseJsonArray<EntityId>(row.requirement_ids_json),
+    applicable: row.applicable === 1,
+    evidenceIds: parseJsonArray<EntityId>(row.evidence_ids_json),
+    status: row.status as AcceptanceCriterion["status"],
+    statusChangedAt: row.status_changed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToBlocker(row: BlockerRow): Blocker {
+  const details = optionalString(row.details);
+  const relatedEntityId = optionalString(row.related_entity_id);
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    kind: row.kind as Blocker["kind"],
+    summary: row.summary,
+    status: row.status as Blocker["status"],
+    statusChangedAt: row.status_changed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...(details !== undefined ? { details } : {}),
+    ...(relatedEntityId !== undefined ? { relatedEntityId } : {}),
+  };
+}
+
+function rowToMasterRun(row: MasterRunRow): MasterRun {
+  const trigger = optionalString(row.trigger);
+  const context = optionalString(row.context);
+  const inputTokens = optionalNumber(row.input_tokens);
+  const outputTokens = optionalNumber(row.output_tokens);
+  const estimatedCost = optionalNumber(row.estimated_cost);
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    proposedAction: row.proposed_action as MasterAction,
+    enforcedAction: row.enforced_action as MasterAction,
+    rationale: row.rationale,
+    finishedBlockedReasons: parseJsonArray<string>(row.finished_blocked_reasons_json),
+    createdTaskIds: parseJsonArray<EntityId>(row.created_task_ids_json),
+    promptVersion: row.prompt_version,
+    model: row.model,
+    status: row.status as MasterRunStatus,
+    statusChangedAt: row.status_changed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...(trigger !== undefined ? { trigger } : {}),
+    ...(context !== undefined ? { context } : {}),
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(estimatedCost !== undefined ? { estimatedCost } : {}),
+  };
+}
+
 export class D1StateStore implements AsyncStateStore {
   constructor(private readonly db: D1Database) {}
 
@@ -741,6 +892,14 @@ export class D1StateStore implements AsyncStateStore {
       .bind(id)
       .first<DefinitionOfDoneRow>();
     return row ? rowToDefinitionOfDone(row) : undefined;
+  }
+
+  async listDefinitionsOfDoneByProject(projectId: EntityId): Promise<readonly DefinitionOfDone[]> {
+    const result = await this.db
+      .prepare(`SELECT * FROM definitions_of_done WHERE project_id = ?`)
+      .bind(projectId)
+      .all<DefinitionOfDoneRow>();
+    return (result.results ?? []).map(rowToDefinitionOfDone);
   }
 
   async createTask(input: CreateTaskInput): Promise<Task> {
@@ -1036,6 +1195,14 @@ export class D1StateStore implements AsyncStateStore {
     return row ? rowToTestCase(row) : undefined;
   }
 
+  async listTestCasesByProject(projectId: EntityId): Promise<readonly TestCase[]> {
+    const result = await this.db
+      .prepare(`SELECT * FROM test_cases WHERE project_id = ?`)
+      .bind(projectId)
+      .all<TestCaseRow>();
+    return (result.results ?? []).map(rowToTestCase);
+  }
+
   async recordTestResult(input: CreateTestResultInput): Promise<TestResult> {
     const result: TestResult = {
       id: input.id,
@@ -1076,6 +1243,14 @@ export class D1StateStore implements AsyncStateStore {
     const result = await this.db
       .prepare(`SELECT * FROM test_results WHERE test_case_id = ? ORDER BY created_at`)
       .bind(testCaseId)
+      .all<TestResultRow>();
+    return (result.results ?? []).map(rowToTestResult);
+  }
+
+  async listTestResultsByProject(projectId: EntityId): Promise<readonly TestResult[]> {
+    const result = await this.db
+      .prepare(`SELECT * FROM test_results WHERE project_id = ? ORDER BY created_at`)
+      .bind(projectId)
       .all<TestResultRow>();
     return (result.results ?? []).map(rowToTestResult);
   }
@@ -1137,6 +1312,14 @@ export class D1StateStore implements AsyncStateStore {
     const result = await this.db
       .prepare(`SELECT * FROM evidence WHERE task_id = ?`)
       .bind(taskId)
+      .all<EvidenceRow>();
+    return (result.results ?? []).map(rowToEvidence);
+  }
+
+  async listEvidenceByProject(projectId: EntityId): Promise<readonly Evidence[]> {
+    const result = await this.db
+      .prepare(`SELECT * FROM evidence WHERE project_id = ?`)
+      .bind(projectId)
       .all<EvidenceRow>();
     return (result.results ?? []).map(rowToEvidence);
   }
@@ -1435,6 +1618,14 @@ export class D1StateStore implements AsyncStateStore {
     return row ? rowToVerifierRun(row) : undefined;
   }
 
+  async listVerifierRunsByProject(projectId: EntityId): Promise<readonly VerifierRun[]> {
+    const result = await this.db
+      .prepare(`SELECT * FROM verifier_runs WHERE project_id = ?`)
+      .bind(projectId)
+      .all<VerifierRunRow>();
+    return (result.results ?? []).map(rowToVerifierRun);
+  }
+
   async getOrCreateMasterState(projectId: EntityId): Promise<MasterState> {
     const row = await this.db
       .prepare(`SELECT * FROM master_state WHERE project_id = ?`)
@@ -1626,6 +1817,29 @@ export class D1StateStore implements AsyncStateStore {
     };
   }
 
+  async addBudgetResource(input: AddBudgetResourceInput): Promise<BudgetLedger> {
+    const existing = await this.getBudgetLedger(input.projectId);
+    if (existing === undefined) {
+      return this.initializeBudgetLedger({
+        projectId: input.projectId,
+        limits: limitsForBudgetResource(input),
+      });
+    }
+    if (existing.limits.some((limit) => limit.category === input.resourceType)) {
+      throw new BudgetResourceConflictError(input.resourceType);
+    }
+    const updated: BudgetLedger = {
+      ...existing,
+      limits: [...existing.limits, ...limitsForBudgetResource(input)],
+      ...touchTimestamps(existing),
+    };
+    await this.db
+      .prepare(`UPDATE budget_ledger SET limits_json = ?, updated_at = ? WHERE project_id = ?`)
+      .bind(toJson(updated.limits), updated.updatedAt, input.projectId)
+      .run();
+    return updated;
+  }
+
   async recordBudgetEntry(input: CreateBudgetEntryInput): Promise<BudgetEntry> {
     const ledger = await this.getBudgetLedger(input.projectId);
     if (!ledger) {
@@ -1701,6 +1915,260 @@ export class D1StateStore implements AsyncStateStore {
     const effectiveLimit = hard ?? soft;
     const remaining = effectiveLimit ? effectiveLimit.maxAmount - usage : Number.POSITIVE_INFINITY;
     return { allowed: true, remaining };
+  }
+
+  async createReleaseContract(input: CreateReleaseContractInput): Promise<ReleaseContract> {
+    const contract: ReleaseContract = {
+      id: input.id,
+      projectId: input.projectId,
+      version: input.version,
+      requiredEvidenceKinds: input.requiredEvidenceKinds,
+      requiredEvidenceLabels: input.requiredEvidenceLabels ?? [],
+      ...(input.notes !== undefined ? { notes: input.notes } : {}),
+      ...createTimestamps(),
+    };
+    await this.db
+      .prepare(
+        `INSERT INTO release_contracts
+         (id, project_id, version, required_evidence_kinds_json, required_evidence_labels_json, notes, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        contract.id,
+        contract.projectId,
+        contract.version,
+        toJson(contract.requiredEvidenceKinds),
+        toJson(contract.requiredEvidenceLabels),
+        contract.notes ?? null,
+        contract.createdAt,
+        contract.updatedAt,
+      )
+      .run();
+    return contract;
+  }
+
+  async getReleaseContract(id: EntityId): Promise<ReleaseContract | undefined> {
+    const row = await this.db
+      .prepare(`SELECT * FROM release_contracts WHERE id = ?`)
+      .bind(id)
+      .first<ReleaseContractRow>();
+    return row ? rowToReleaseContract(row) : undefined;
+  }
+
+  async getLatestReleaseContract(projectId: EntityId): Promise<ReleaseContract | undefined> {
+    const row = await this.db
+      .prepare(
+        `SELECT * FROM release_contracts WHERE project_id = ? ORDER BY version DESC, created_at DESC LIMIT 1`,
+      )
+      .bind(projectId)
+      .first<ReleaseContractRow>();
+    return row ? rowToReleaseContract(row) : undefined;
+  }
+
+  async createAcceptanceCriterion(input: CreateAcceptanceCriterionInput): Promise<AcceptanceCriterion> {
+    const criterion: AcceptanceCriterion = {
+      id: input.id,
+      projectId: input.projectId,
+      releaseContractId: input.releaseContractId,
+      description: input.description,
+      requirementIds: input.requirementIds ?? [],
+      applicable: input.applicable ?? true,
+      evidenceIds: [],
+      ...createTimestamps(),
+      ...withStatus("pending"),
+    };
+    await this.db
+      .prepare(
+        `INSERT INTO acceptance_criteria
+         (id, project_id, release_contract_id, description, requirement_ids_json, applicable, status, status_changed_at, evidence_ids_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        criterion.id,
+        criterion.projectId,
+        criterion.releaseContractId,
+        criterion.description,
+        toJson(criterion.requirementIds),
+        criterion.applicable ? 1 : 0,
+        criterion.status,
+        criterion.statusChangedAt,
+        toJson(criterion.evidenceIds),
+        criterion.createdAt,
+        criterion.updatedAt,
+      )
+      .run();
+    return criterion;
+  }
+
+  async updateAcceptanceCriterion(input: UpdateAcceptanceCriterionInput): Promise<AcceptanceCriterion> {
+    const existing = await this.db
+      .prepare(`SELECT * FROM acceptance_criteria WHERE id = ?`)
+      .bind(input.id)
+      .first<AcceptanceCriterionRow>();
+    if (!existing) {
+      throw new Error(`AcceptanceCriterion not found: ${input.id}`);
+    }
+    const current = rowToAcceptanceCriterion(existing);
+    const updated: AcceptanceCriterion = {
+      ...current,
+      ...withStatus(input.status),
+      ...(input.evidenceIds !== undefined ? { evidenceIds: input.evidenceIds } : {}),
+      ...touchTimestamps(current),
+    };
+    await this.db
+      .prepare(
+        `UPDATE acceptance_criteria
+         SET status = ?, status_changed_at = ?, evidence_ids_json = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .bind(
+        updated.status,
+        updated.statusChangedAt,
+        toJson(updated.evidenceIds),
+        updated.updatedAt,
+        input.id,
+      )
+      .run();
+    return updated;
+  }
+
+  async listAcceptanceCriteriaByProject(projectId: EntityId): Promise<readonly AcceptanceCriterion[]> {
+    const result = await this.db
+      .prepare(`SELECT * FROM acceptance_criteria WHERE project_id = ?`)
+      .bind(projectId)
+      .all<AcceptanceCriterionRow>();
+    return (result.results ?? []).map(rowToAcceptanceCriterion);
+  }
+
+  async createBlocker(input: CreateBlockerInput): Promise<Blocker> {
+    const blocker: Blocker = {
+      id: input.id,
+      projectId: input.projectId,
+      kind: input.kind,
+      summary: input.summary,
+      ...(input.details !== undefined ? { details: input.details } : {}),
+      ...(input.relatedEntityId !== undefined ? { relatedEntityId: input.relatedEntityId } : {}),
+      ...createTimestamps(),
+      ...withStatus("open"),
+    };
+    await this.db
+      .prepare(
+        `INSERT INTO blockers
+         (id, project_id, kind, summary, details, related_entity_id, status, status_changed_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        blocker.id,
+        blocker.projectId,
+        blocker.kind,
+        blocker.summary,
+        blocker.details ?? null,
+        blocker.relatedEntityId ?? null,
+        blocker.status,
+        blocker.statusChangedAt,
+        blocker.createdAt,
+        blocker.updatedAt,
+      )
+      .run();
+    return blocker;
+  }
+
+  async resolveBlocker(blockerId: EntityId): Promise<Blocker> {
+    const row = await this.db
+      .prepare(`SELECT * FROM blockers WHERE id = ?`)
+      .bind(blockerId)
+      .first<BlockerRow>();
+    if (!row) {
+      throw new Error(`Blocker not found: ${blockerId}`);
+    }
+    const current = rowToBlocker(row);
+    const updated: Blocker = {
+      ...current,
+      ...withStatus("resolved"),
+      ...touchTimestamps(current),
+    };
+    await this.db
+      .prepare(
+        `UPDATE blockers SET status = ?, status_changed_at = ?, updated_at = ? WHERE id = ?`,
+      )
+      .bind(updated.status, updated.statusChangedAt, updated.updatedAt, blockerId)
+      .run();
+    return updated;
+  }
+
+  async listBlockersByProject(projectId: EntityId): Promise<readonly Blocker[]> {
+    const result = await this.db
+      .prepare(`SELECT * FROM blockers WHERE project_id = ?`)
+      .bind(projectId)
+      .all<BlockerRow>();
+    return (result.results ?? []).map(rowToBlocker);
+  }
+
+  async createMasterRun(input: CreateMasterRunInput): Promise<MasterRun> {
+    const run: MasterRun = {
+      id: input.id,
+      projectId: input.projectId,
+      proposedAction: input.proposedAction,
+      enforcedAction: input.enforcedAction,
+      rationale: input.rationale,
+      finishedBlockedReasons: input.finishedBlockedReasons ?? [],
+      createdTaskIds: input.createdTaskIds ?? [],
+      promptVersion: input.promptVersion,
+      model: input.model,
+      ...(input.trigger !== undefined ? { trigger: input.trigger } : {}),
+      ...(input.context !== undefined ? { context: input.context } : {}),
+      ...(input.inputTokens !== undefined ? { inputTokens: input.inputTokens } : {}),
+      ...(input.outputTokens !== undefined ? { outputTokens: input.outputTokens } : {}),
+      ...(input.estimatedCost !== undefined ? { estimatedCost: input.estimatedCost } : {}),
+      ...createTimestamps(),
+      ...withStatus(input.status),
+    };
+    await this.db
+      .prepare(
+        `INSERT INTO master_runs
+         (id, project_id, trigger, context, proposed_action, enforced_action, rationale,
+          finished_blocked_reasons_json, created_task_ids_json, prompt_version, model,
+          input_tokens, output_tokens, estimated_cost, status, status_changed_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        run.id,
+        run.projectId,
+        run.trigger ?? null,
+        run.context ?? null,
+        run.proposedAction,
+        run.enforcedAction,
+        run.rationale,
+        toJson(run.finishedBlockedReasons),
+        toJson(run.createdTaskIds),
+        run.promptVersion,
+        run.model,
+        run.inputTokens ?? null,
+        run.outputTokens ?? null,
+        run.estimatedCost ?? null,
+        run.status,
+        run.statusChangedAt,
+        run.createdAt,
+        run.updatedAt,
+      )
+      .run();
+    return run;
+  }
+
+  async getMasterRun(id: EntityId): Promise<MasterRun | undefined> {
+    const row = await this.db
+      .prepare(`SELECT * FROM master_runs WHERE id = ?`)
+      .bind(id)
+      .first<MasterRunRow>();
+    return row ? rowToMasterRun(row) : undefined;
+  }
+
+  async listMasterRunsByProject(projectId: EntityId): Promise<readonly MasterRun[]> {
+    const result = await this.db
+      .prepare(`SELECT * FROM master_runs WHERE project_id = ? ORDER BY created_at DESC`)
+      .bind(projectId)
+      .all<MasterRunRow>();
+    return (result.results ?? []).map(rowToMasterRun);
   }
 }
 

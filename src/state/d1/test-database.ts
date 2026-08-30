@@ -1,5 +1,5 @@
 import initSqlJs, { type SqlJsDatabase } from "sql.js";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { D1Database, D1ExecResult, D1Result } from "@cloudflare/workers-types";
@@ -16,10 +16,11 @@ async function getSqlJs() {
 }
 
 function loadMigrationSql(): string {
-  return readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "../../../migrations/0001_initial.sql"),
-    "utf8",
-  );
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "../../../migrations");
+  const files = readdirSync(dir)
+    .filter((name) => name.endsWith(".sql"))
+    .sort();
+  return files.map((name) => readFileSync(join(dir, name), "utf8")).join("\n");
 }
 
 function meta(changes = 0, rowsRead = 0): D1Result["meta"] {
