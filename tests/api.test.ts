@@ -3,13 +3,17 @@ import { createApiRouter } from "../src/api/index.js";
 import { InMemoryEvidenceBlobStore, evidenceBlobKey } from "../src/evidence/index.js";
 import { asAsyncStore, createInMemoryStateStore } from "../src/state/index.js";
 
+const TEST_TOKEN = "test-service-token";
 const BASE = "http://localhost";
 
 function createHarness() {
   const syncStore = createInMemoryStateStore();
   const store = asAsyncStore(syncStore);
   const blobs = new InMemoryEvidenceBlobStore();
-  const router = createApiRouter({ store, blobs });
+  const router = createApiRouter({
+    deps: { store, blobs },
+    auth: { serviceToken: TEST_TOKEN, production: false },
+  });
   return { router, store, syncStore, blobs };
 }
 
@@ -20,10 +24,14 @@ async function request(
   body?: unknown,
 ): Promise<Response> {
   const init: RequestInit = { method };
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${TEST_TOKEN}`,
+  };
   if (body !== undefined) {
-    init.headers = { "content-type": "application/json" };
+    headers["content-type"] = "application/json";
     init.body = JSON.stringify(body);
   }
+  init.headers = headers;
   return router(new Request(`${BASE}${path}`, init));
 }
 
@@ -40,7 +48,7 @@ describe("API router", () => {
   });
 
   it("returns health status", async () => {
-    const res = await request(router, "GET", "/health");
+    const res = await router(new Request(`${BASE}/health`, { method: "GET" }));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: "ok" });
   });

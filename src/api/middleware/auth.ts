@@ -1,8 +1,2 @@
-/** Authentication must be added before deployment. */
-export async function authMiddleware(
-  request: Request,
-  next: () => Promise<Response>,
-): Promise<Response> {
-  void request;
-  return next();
-}
+/** Legacy entry point — authentication is enforced in createApiRouter. */
+export { authenticateBearer, type AuthConfig } from "../auth/index.js";

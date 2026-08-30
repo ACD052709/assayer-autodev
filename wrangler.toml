@@ -18,3 +18,7 @@ bucket_name = "assayer-autodev-evidence"
 
 [vars]
 ENVIRONMENT = "local"
+
+# Secret binding (required before deployment):
+#   wrangler secret put AUTODEV_SERVICE_TOKEN
+# Never store token values in this file or source control.

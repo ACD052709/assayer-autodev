@@ -100,7 +100,34 @@ Domain types are shared; only the persistence adapter changes.
 | POST | `/api/verifier-runs` | Create or complete verifier run |
 | POST | `/api/master/inbox` | Enqueue master inbox item |
 
-**Authentication is not implemented.** `authMiddleware` is a pass-through stub; add auth before any deployment.
+## Control-plane security model
+
+This API is **private machine-to-machine infrastructure**. It is not a browser-facing service.
+
+| Control | Behavior |
+|---------|----------|
+| Authentication | Protected routes require `Authorization: Bearer <token>` |
+| Secret binding | `AUTODEV_SERVICE_TOKEN` via `wrangler secret put` — **never** in source, tests, README examples, or `.env.example` |
+| Fail closed | Protected routes return `503 auth_misconfigured` if the secret is missing at runtime |
+| Roles (V1) | Route policies declare `master`, `worker`, `verifier`, `admin`; the service token maps temporarily to `admin` |
+| Request limits | JSON metadata max **256 KiB**; invalid `Content-Length` rejected |
+| Evidence bootstrap | `blobBase64` is **temporary** — max decoded **64 KiB** for small test blobs only |
+| Future evidence | Production uploads should go **directly to controlled R2 paths**, not giant JSON bodies |
+| Content-Type | POST JSON routes require `application/json` (`415` otherwise) |
+| CORS | **No wildcard CORS** — not enabled |
+| Errors | No stack traces, secrets, SQL, or env vars in client responses |
+| Headers | `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` |
+| `/health` | Unauthenticated minimal `{ "status": "ok" }` only |
+
+**Do not deploy to Cloudflare without setting `AUTODEV_SERVICE_TOKEN`.** This is required for the first private deployment.
+
+### Setting the service token (when deploying)
+
+```bash
+npx wrangler secret put AUTODEV_SERVICE_TOKEN
+```
+
+Do not paste the token into any file tracked by git.
 
 ## Local development
 
@@ -141,8 +168,9 @@ npx wrangler d1 migrations apply assayer-autodev-db --remote  # production
 - GitHub / GitHub Actions
 - Assayer product integration
 - Cloudflare resource provisioning (placeholder IDs in `wrangler.toml`)
-- API authentication
-- Production deployment
+- Per-role token issuance (V1 uses one service token mapped to admin)
+- Direct-to-R2 presigned/large evidence uploads
+- Production deployment without `AUTODEV_SERVICE_TOKEN`
 
 ## License
 

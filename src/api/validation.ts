@@ -88,20 +88,6 @@ export function assertObject(value: unknown, field: string): Record<string, unkn
   return value as Record<string, unknown>;
 }
 
-export async function parseJsonBody(request: Request): Promise<Record<string, unknown>> {
-  const contentType = request.headers.get("content-type") ?? "";
-  if (!contentType.includes("application/json")) {
-    throw new ApiError(415, "unsupported_media_type", "Content-Type must be application/json");
-  }
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    throw new ApiError(400, "invalid_json", "Request body must be valid JSON");
-  }
-  return assertObject(body, "body");
-}
-
 export const validators = {
   projectStatus: (v: unknown, f: string) => assertEnum(v, f, PROJECT_STATUSES),
   requirementStatus: (v: unknown, f: string) => assertEnum(v, f, REQUIREMENT_STATUSES),
@@ -131,17 +117,4 @@ export function rejectUnknownKeys(body: Record<string, unknown>, allowed: readon
       ]);
     }
   }
-}
-
-export function decodeBase64ToBytes(value: string): Uint8Array {
-  if (typeof atob === "function") {
-    const binary = atob(value);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes;
-  }
-  const buf = Buffer.from(value, "base64");
-  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 }

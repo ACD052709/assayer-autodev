@@ -1,3 +1,6 @@
+import { logServerError } from "./auth/token.js";
+import { applySecurityHeaders } from "./security/headers.js";
+
 export interface ApiErrorBody {
   readonly error: {
     readonly code: string;
@@ -39,12 +42,20 @@ export function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-export function handleApiError(error: unknown): Response {
+export function handleApiError(error: unknown, production = false): Response {
   if (error instanceof ApiError) {
     return error.toResponse();
   }
-  if (error instanceof Error) {
-    return new ApiError(500, "internal_error", error.message).toResponse();
+
+  logServerError("api", error);
+
+  void production;
+  return new ApiError(500, "internal_error", "An internal error occurred").toResponse();
+}
+
+export function finalizeResponse(response: Response, production: boolean, error?: unknown): Response {
+  if (error !== undefined) {
+    return applySecurityHeaders(handleApiError(error, production));
   }
-  return new ApiError(500, "internal_error", "Unknown error").toResponse();
+  return applySecurityHeaders(response);
 }
