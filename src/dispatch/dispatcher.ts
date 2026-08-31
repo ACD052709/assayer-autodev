@@ -9,6 +9,8 @@ import type {
 import type { IdFactory } from "../master/ids.js";
 import { createRandomIdFactory } from "../master/ids.js";
 import type { AsyncStateStore } from "../state/async-store.js";
+import type { WorkerLaunchBridge, WorkerLaunchRecord } from "./github-launch-bridge.js";
+import { NOOP_WORKER_LAUNCH_BRIDGE } from "./github-launch-bridge.js";
 import {
   compareTasksForDispatch,
   DEFAULT_MAX_ASSIGNMENTS,
@@ -24,6 +26,7 @@ export interface WorkerDispatcherOptions {
   readonly store: AsyncStateStore;
   readonly idFactory?: IdFactory;
   readonly workerKind?: WorkerKind;
+  readonly launchBridge?: WorkerLaunchBridge;
 }
 
 export interface DispatchRequest {
@@ -32,6 +35,7 @@ export interface DispatchRequest {
 
 export interface DispatchResult {
   readonly assignments: readonly TaskWorkerAssignment[];
+  readonly launches: readonly WorkerLaunchRecord[];
 }
 
 export interface PersistWorkerReportResult {
@@ -88,11 +92,13 @@ export class WorkerDispatcher {
   private readonly store: AsyncStateStore;
   private readonly ids: IdFactory;
   private readonly workerKind: WorkerKind;
+  private readonly launchBridge: WorkerLaunchBridge;
 
   constructor(options: WorkerDispatcherOptions) {
     this.store = options.store;
     this.ids = options.idFactory ?? createRandomIdFactory();
     this.workerKind = options.workerKind ?? DISPATCH_WORKER_KIND;
+    this.launchBridge = options.launchBridge ?? NOOP_WORKER_LAUNCH_BRIDGE;
   }
 
   async dispatch(projectId: EntityId, request: DispatchRequest = {}): Promise<DispatchResult> {
@@ -131,7 +137,11 @@ export class WorkerDispatcher {
       assignments.push(assignment);
     }
 
-    return { assignments };
+    const launches = await Promise.all(
+      assignments.map((assignment) => this.launchBridge.launch(assignment.workerRun.id)),
+    );
+
+    return { assignments, launches };
   }
 
   /**

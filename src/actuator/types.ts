@@ -1,16 +1,10 @@
 /**
  * GitHub Actions worker actuator types and constants.
  *
- * NEXT STAGE (not implemented): dispatch-to-GitHub launch bridge.
- *
- * dispatcher creates a queued worker_run
- * → a control-plane launch bridge would invoke GitHub workflow_dispatch
- * → this actuator claims that worker_run and drives lease/heartbeat/succeed|fail
- *
- * Launch remains manual (`workflow_dispatch` only) until this external worker is proven.
- * The Worker must not auto-start GitHub Actions in this phase.
+ * After dispatch assigns a queued worker_run, an optional control-plane launch bridge
+ * invokes GitHub workflow_dispatch (see dispatch/github-launch-bridge.ts).
  */
-export const DISPATCH_LAUNCH_BRIDGE_STATUS = "manual_workflow_dispatch_only" as const;
+export const DISPATCH_LAUNCH_BRIDGE_STATUS = "github_workflow_dispatch_optional" as const;
 
 export const EXECUTION_MODES = ["synthetic-noop"] as const;
 export type ExecutionMode = (typeof EXECUTION_MODES)[number];

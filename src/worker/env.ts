@@ -8,4 +8,11 @@ export interface WorkerEnv {
   readonly AUTODEV_SERVICE_TOKEN?: string;
   /** Set via `wrangler secret put OPENAI_API_KEY` — never commit values. */
   readonly OPENAI_API_KEY?: string;
+  /** Set via `wrangler secret put GITHUB_TOKEN` — triggers workflow_dispatch after dispatch. */
+  readonly GITHUB_TOKEN?: string;
+  /** Repository slug `owner/repo` for the worker workflow. */
+  readonly GITHUB_REPOSITORY?: string;
+  readonly GITHUB_WORKFLOW_FILE?: string;
+  readonly GITHUB_WORKFLOW_REF?: string;
+  readonly GITHUB_EXECUTION_MODE?: string;
 }

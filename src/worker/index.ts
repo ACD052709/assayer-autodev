@@ -1,5 +1,5 @@
 import { createApiRouter } from "../api/index.js";
-import { createWorkerDispatcher } from "../dispatch/index.js";
+import { createWorkerDispatcher, createGitHubLaunchBridgeFromEnv } from "../dispatch/index.js";
 import { createWorkerRunLifecycle } from "../executor/index.js";
 import { R2EvidenceBlobStore } from "../evidence/index.js";
 import { createMasterOrchestrator, OpenAIMasterModelClient } from "../master/index.js";
@@ -18,7 +18,11 @@ export default {
             client: new OpenAIMasterModelClient({ apiKey: openaiKey }),
           })
         : undefined;
-    const taskDispatcher = createWorkerDispatcher({ store });
+    const launchBridge = createGitHubLaunchBridgeFromEnv(env);
+    const taskDispatcher = createWorkerDispatcher({
+      store,
+      ...(launchBridge !== undefined ? { launchBridge } : {}),
+    });
     const workerRunLifecycle = createWorkerRunLifecycle({ store, dispatcher: taskDispatcher });
     const router = createApiRouter({
       deps: {

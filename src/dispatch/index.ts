@@ -24,3 +24,11 @@ export {
   selectIndependentEligibleTasks,
 } from "./eligibility.js";
 export { DispatchValidationError, WorkerReportValidationError } from "./errors.js";
+export {
+  createGitHubLaunchBridge,
+  createGitHubLaunchBridgeFromEnv,
+  NOOP_WORKER_LAUNCH_BRIDGE,
+  type GitHubLaunchBridgeConfig,
+  type WorkerLaunchBridge,
+  type WorkerLaunchRecord,
+} from "./github-launch-bridge.js";

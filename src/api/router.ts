@@ -896,7 +896,7 @@ async function handlePostProjectDispatch(
     const result = await dispatcherFor(deps).dispatch(projectId, {
       ...(maxAssignments !== undefined ? { maxAssignments } : {}),
     });
-    return jsonResponse({ assignments: result.assignments });
+    return jsonResponse({ assignments: result.assignments, launches: result.launches });
   } catch (error) {
     if (error instanceof DispatchValidationError) {
       throw new ApiError(400, "validation_error", `Invalid ${error.field}`, [

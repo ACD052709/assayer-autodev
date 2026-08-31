@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/index.js";
-import { createWorkerDispatcher, MAX_ASSIGNMENTS_LIMIT } from "../src/dispatch/index.js";
+import {
+  createGitHubLaunchBridge,
+  createWorkerDispatcher,
+  MAX_ASSIGNMENTS_LIMIT,
+} from "../src/dispatch/index.js";
 import { InMemoryEvidenceBlobStore } from "../src/evidence/index.js";
 import { createSequentialIdFactory } from "../src/master/index.js";
 import { asAsyncStore, createInMemoryStateStore } from "../src/state/index.js";
@@ -84,6 +88,13 @@ describe("Dispatch API", () => {
     expect(body.assignments[0]!.task.status).toBe("assigned");
     expect(body.assignments[0]!.task.assignedWorkerRunId).toBe(body.assignments[0]!.workerRun.id);
 
+    const dispatchBody = body as typeof body & {
+      launches: { workerRunId: string; launched: boolean; skipped?: boolean }[];
+    };
+    expect(dispatchBody.launches).toHaveLength(2);
+    expect(dispatchBody.launches.every((launch) => launch.launched === false)).toBe(true);
+    expect(dispatchBody.launches.every((launch) => launch.skipped === true)).toBe(true);
+
     const listed = await request(router, "GET", `/api/projects/${PROJECT_ID}/worker-runs`);
     expect(listed.status).toBe(200);
     const listedBody = (await listed.json()) as { workerRuns: { id: string; projectId: string }[] };
@@ -107,6 +118,62 @@ describe("Dispatch API", () => {
       maxAssignments: MAX_ASSIGNMENTS_LIMIT + 1,
     });
     expect(tooHigh.status).toBe(400);
+  });
+
+  it("launches GitHub Actions when a launch bridge is configured", async () => {
+    const calls: string[] = [];
+    const launchBridge = createGitHubLaunchBridge(
+      {
+        token: "ghs_test",
+        repository: "ACD052709/assayer-autodev",
+        workflowFile: "autodev-worker.yml",
+        ref: "main",
+        executionMode: "synthetic-noop",
+      },
+      async (url) => {
+        calls.push(String(url));
+        return new Response(null, { status: 204 });
+      },
+    );
+    const syncStore = createInMemoryStateStore();
+    const store = asAsyncStore(syncStore);
+    const router = createApiRouter({
+      deps: {
+        store,
+        blobs: new InMemoryEvidenceBlobStore(),
+        taskDispatcher: createWorkerDispatcher({
+          store,
+          idFactory: createSequentialIdFactory(),
+          launchBridge,
+        }),
+      },
+      auth: { serviceToken: TEST_TOKEN, production: false },
+    });
+    await request(router, "POST", "/api/projects", {
+      id: "proj-launch",
+      name: "Launch",
+      description: "Launch",
+    });
+    await request(router, "POST", "/api/tasks", {
+      id: "task-launch",
+      projectId: "proj-launch",
+      title: "Launch",
+      description: "Launch",
+      kind: "implementation",
+    });
+
+    const dispatch = await request(router, "POST", "/api/projects/proj-launch/dispatch", {
+      maxAssignments: 1,
+    });
+    expect(dispatch.status).toBe(200);
+    const body = (await dispatch.json()) as {
+      assignments: { workerRun: { id: string } }[];
+      launches: { workerRunId: string; launched: boolean }[];
+    };
+    expect(body.launches).toHaveLength(1);
+    expect(body.launches[0]!.workerRunId).toBe(body.assignments[0]!.workerRun.id);
+    expect(body.launches[0]!.launched).toBe(true);
+    expect(calls).toHaveLength(1);
   });
 
   it("requires Master/control-plane write auth for dispatch", async () => {
