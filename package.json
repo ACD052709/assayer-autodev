@@ -9,7 +9,8 @@
     "typecheck:worker": "tsc --noEmit -p tsconfig.worker.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "worker:validate": "wrangler deploy --dry-run --outdir dist/worker"
+    "worker:validate": "wrangler deploy --dry-run --outdir dist/worker",
+    "actuator": "tsx src/cli/run-worker.ts"
   },
   "engines": {
     "node": ">=20"
@@ -18,6 +19,7 @@
     "@cloudflare/workers-types": "^5.20260830.1",
     "@types/node": "^22.10.0",
     "sql.js": "^1.12.0",
+    "tsx": "^4.23.13",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8",
     "wrangler": "^4.127.1"

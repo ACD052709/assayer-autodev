@@ -1,0 +1,61 @@
+# External GitHub Actions worker actuator (synthetic-noop only).
+#
+# NEXT STAGE (not implemented): a control-plane launch bridge would call
+# GitHub workflow_dispatch after the dispatcher creates a queued worker_run.
+# Launch stays manual until this actuator is proven. Do not auto-start
+# workflows from the Worker in this phase.
+#
+# This workflow talks only to the assayer-autodev control-plane HTTP API.
+# It must not clone Assayer, access Cloudflare/OpenAI credentials, deploy,
+# push commits, or modify D1 directly.
+
+name: AutoDev worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      workerRunId:
+        description: Control-plane worker_run id to claim
+        required: true
+        type: string
+      executionMode:
+        description: Isolated execution mode (synthetic-noop only)
+        required: true
+        type: choice
+        options:
+          - synthetic-noop
+        default: synthetic-noop
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autodev-worker-${{ github.event.inputs.workerRunId }}
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AUTODEV_CONTROL_PLANE_URL: https://assayer-autodev-control-plane.gr8white911.workers.dev
+    steps:
+      - name: Checkout assayer-autodev
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install pinned dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run worker actuator
+        env:
+          AUTODEV_SERVICE_TOKEN: ${{ secrets.AUTODEV_SERVICE_TOKEN }}
+        run: npm run actuator -- --worker-run-id "${{ github.event.inputs.workerRunId }}" --execution-mode "${{ github.event.inputs.executionMode }}"
