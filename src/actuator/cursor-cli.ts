@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-export const CURSOR_CLI_COMMAND = "cursor-agent";
+export const CURSOR_CLI_COMMAND = "agent";
 
 export interface CursorCliInvocation {
   readonly command: string;
