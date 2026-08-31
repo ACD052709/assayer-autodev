@@ -38,8 +38,9 @@ describe("GitHub Actions worker workflow", () => {
     expect(workflow).not.toContain("leaseToken");
   });
 
-  it("only allows synthetic-noop executionMode", () => {
+  it("allows synthetic-noop and coding-task executionMode", () => {
     expect(workflow).toContain("synthetic-noop");
+    expect(workflow).toContain("coding-task");
     expect(workflow).not.toContain("cursor-acp");
     expect(workflow).not.toContain("--command");
   });

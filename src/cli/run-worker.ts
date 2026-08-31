@@ -31,8 +31,17 @@ async function main(argv: string[]): Promise<number> {
     ...(process.env.GITHUB_RUN_ATTEMPT !== undefined
       ? { GITHUB_RUN_ATTEMPT: process.env.GITHUB_RUN_ATTEMPT }
       : {}),
+    ...(process.env.AUTODEV_WORKSPACE_ROOT !== undefined
+      ? { AUTODEV_WORKSPACE_ROOT: process.env.AUTODEV_WORKSPACE_ROOT }
+      : {}),
+    ...(process.env.AUTODEV_CODING_TASK_TIMEOUT_MS !== undefined
+      ? { AUTODEV_CODING_TASK_TIMEOUT_MS: process.env.AUTODEV_CODING_TASK_TIMEOUT_MS }
+      : {}),
+    ...(process.env.CURSOR_API_KEY !== undefined ? { CURSOR_API_KEY: process.env.CURSOR_API_KEY } : {}),
   };
-  const secrets = [env.AUTODEV_SERVICE_TOKEN];
+  const secrets = [env.AUTODEV_SERVICE_TOKEN, env.CURSOR_API_KEY].filter(
+    (value): value is string => value !== undefined && value.length > 0,
+  );
   const logger = createSanitizingLogger(secrets);
 
   try {

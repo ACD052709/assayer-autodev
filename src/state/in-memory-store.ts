@@ -131,6 +131,7 @@ export class InMemoryStateStore implements StateStore {
       doNotModifyConstraints: [...(input.doNotModifyConstraints ?? [])],
       ...(input.targetRepository !== undefined ? { targetRepository: input.targetRepository } : {}),
       ...(input.targetRef !== undefined ? { targetRef: input.targetRef } : {}),
+      ...(input.targetTestCommand !== undefined ? { targetTestCommand: input.targetTestCommand } : {}),
       ...ts,
       ...withStatus("active"),
     };
@@ -155,6 +156,7 @@ export class InMemoryStateStore implements StateStore {
       ...existing,
       ...(input.targetRepository !== undefined ? { targetRepository: input.targetRepository } : {}),
       ...(input.targetRef !== undefined ? { targetRef: input.targetRef } : {}),
+      ...(input.targetTestCommand !== undefined ? { targetTestCommand: input.targetTestCommand } : {}),
       ...(input.doNotModifyConstraints !== undefined
         ? { doNotModifyConstraints: [...input.doNotModifyConstraints] }
         : {}),

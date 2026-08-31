@@ -1,6 +1,11 @@
 import { ActuatorError, sanitizeActuatorError } from "./errors.js";
 import { startHeartbeatLoop } from "./heartbeat-loop.js";
 import { createSanitizingLogger } from "./logger.js";
+import type { GitRunner, GitStatusReader } from "./coding-task-checkout.js";
+import { createGitRunner, createGitStatusReader } from "./coding-task-checkout.js";
+import { runCodingTask } from "./coding-task.js";
+import type { ProcessRunner } from "./process-runner.js";
+import { createSubprocessRunner } from "./process-runner.js";
 import { runSyntheticNoop } from "./synthetic-noop.js";
 import type {
   ActuatorConfig,
@@ -26,6 +31,9 @@ export interface RunActuatorOptions {
   readonly timers?: ActuatorTimers;
   readonly sleep?: SleepFn;
   readonly installSignalHandlers?: SignalInstaller;
+  readonly processRunner?: ProcessRunner;
+  readonly gitRunner?: GitRunner;
+  readonly gitStatusReader?: GitStatusReader;
 }
 
 const DEFAULT_TIMERS: ActuatorTimers = {
@@ -101,6 +109,86 @@ export async function runActuator(options: RunActuatorOptions): Promise<Actuator
         workAbort.abort();
       },
     });
+
+    if (config.executionMode === "coding-task") {
+      try {
+        const codingResult = await runCodingTask({
+          workerRunId: config.workerRunId,
+          leaseToken: token,
+          workspaceRoot: config.workspaceRoot,
+          codingTaskTimeoutMs: config.codingTaskTimeoutMs,
+          ...(config.cursorApiKey !== undefined ? { cursorApiKey: config.cursorApiKey } : {}),
+          client,
+          process: options.processRunner ?? createSubprocessRunner(),
+          git: options.gitRunner ?? createGitRunner(),
+          gitStatus: options.gitStatusReader ?? createGitStatusReader(),
+          signal: workAbort.signal,
+        });
+        await heartbeat.stop();
+        if (ownershipLost) {
+          log.error("Ownership lost during coding-task; leaving run for lease recovery");
+          return { ok: false, exitCode: 1, reason: "ownership_lost" };
+        }
+        if (codingResult.ok) {
+          terminalSent = true;
+          const done = await client.succeed(config.workerRunId, token, {
+            summary: codingResult.summary,
+            structuredOutcome: codingResult.structuredOutcome,
+          });
+          log.info("Worker run succeeded", {
+            workerRunId: done.workerRun.id,
+            runStatus: done.workerRun.status,
+            taskStatus: done.task.status,
+          });
+          return { ok: true, exitCode: 0, reason: "succeeded" };
+        }
+        return failIfOwned({
+          client,
+          config,
+          leaseToken: token,
+          log,
+          terminalSent: () => terminalSent,
+          markTerminal: () => {
+            terminalSent = true;
+          },
+          errorCode: codingResult.errorCode ?? "CODING_TASK_FAILED",
+          summary: codingResult.summary,
+        });
+      } catch (error) {
+        await heartbeat.stop();
+        const sanitized = sanitizeActuatorError(error, secrets);
+        if (ownershipLost || sanitized.ownershipLost) {
+          log.error("Ownership lost; not reporting terminal failure with an invalid lease");
+          return { ok: false, exitCode: 1, reason: "ownership_lost" };
+        }
+        if (interrupted) {
+          return failIfOwned({
+            client,
+            config,
+            leaseToken: token,
+            log,
+            terminalSent: () => terminalSent,
+            markTerminal: () => {
+              terminalSent = true;
+            },
+            errorCode: "EXECUTOR_INTERRUPTED",
+            summary: "Executor interrupted before coding-task completed",
+          });
+        }
+        return failIfOwned({
+          client,
+          config,
+          leaseToken: token,
+          log,
+          terminalSent: () => terminalSent,
+          markTerminal: () => {
+            terminalSent = true;
+          },
+          errorCode: "CODING_TASK_FAILED",
+          summary: sanitized.message,
+        });
+      }
+    }
 
     try {
       const outcome = await runSyntheticNoop({

@@ -113,6 +113,7 @@ interface ProjectRow {
   updated_at: string;
   target_repository: string | null;
   target_ref: string | null;
+  target_test_command: string | null;
   do_not_modify_constraints_json: string;
 }
 
@@ -423,6 +424,7 @@ function parseDoNotModifyConstraintsJson(value: string): readonly string[] {
 function rowToProject(row: ProjectRow): Project {
   const targetRepository = optionalString(row.target_repository);
   const targetRef = optionalString(row.target_ref);
+  const targetTestCommand = optionalString(row.target_test_command);
   return {
     id: row.id,
     name: row.name,
@@ -430,6 +432,7 @@ function rowToProject(row: ProjectRow): Project {
     doNotModifyConstraints: parseDoNotModifyConstraintsJson(row.do_not_modify_constraints_json),
     ...(targetRepository !== undefined ? { targetRepository } : {}),
     ...(targetRef !== undefined ? { targetRef } : {}),
+    ...(targetTestCommand !== undefined ? { targetTestCommand } : {}),
     status: row.status as Project["status"],
     statusChangedAt: row.status_changed_at,
     createdAt: row.created_at,
@@ -837,6 +840,7 @@ export class D1StateStore implements AsyncStateStore {
       doNotModifyConstraints: [...(input.doNotModifyConstraints ?? [])],
       ...(input.targetRepository !== undefined ? { targetRepository: input.targetRepository } : {}),
       ...(input.targetRef !== undefined ? { targetRef: input.targetRef } : {}),
+      ...(input.targetTestCommand !== undefined ? { targetTestCommand: input.targetTestCommand } : {}),
       ...ts,
       ...withStatus("active"),
     };
@@ -844,8 +848,8 @@ export class D1StateStore implements AsyncStateStore {
       .prepare(
         `INSERT INTO projects
          (id, name, description, status, status_changed_at, created_at, updated_at,
-          target_repository, target_ref, do_not_modify_constraints_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          target_repository, target_ref, target_test_command, do_not_modify_constraints_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         project.id,
@@ -857,6 +861,7 @@ export class D1StateStore implements AsyncStateStore {
         project.updatedAt,
         project.targetRepository ?? null,
         project.targetRef ?? null,
+        project.targetTestCommand ?? null,
         JSON.stringify(project.doNotModifyConstraints),
       )
       .run();
@@ -893,12 +898,13 @@ export class D1StateStore implements AsyncStateStore {
     await this.db
       .prepare(
         `UPDATE projects
-         SET target_repository = ?, target_ref = ?, do_not_modify_constraints_json = ?, updated_at = ?
+         SET target_repository = ?, target_ref = ?, target_test_command = ?, do_not_modify_constraints_json = ?, updated_at = ?
          WHERE id = ?`,
       )
       .bind(
         updated.targetRepository ?? null,
         updated.targetRef ?? null,
+        updated.targetTestCommand ?? null,
         JSON.stringify(updated.doNotModifyConstraints),
         updated.updatedAt,
         input.projectId,

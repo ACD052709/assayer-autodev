@@ -6,7 +6,7 @@
  */
 export const DISPATCH_LAUNCH_BRIDGE_STATUS = "github_workflow_dispatch_optional" as const;
 
-export const EXECUTION_MODES = ["synthetic-noop"] as const;
+export const EXECUTION_MODES = ["synthetic-noop", "coding-task"] as const;
 export type ExecutionMode = (typeof EXECUTION_MODES)[number];
 
 export function isExecutionMode(value: string): value is ExecutionMode {
@@ -18,6 +18,13 @@ export const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 
 /** Consecutive non-ownership heartbeat failures before fail-closed. */
 export const DEFAULT_HEARTBEAT_FAILURE_LIMIT = 2;
+
+/** Default bounded Cursor CLI runtime for coding-task (below typical GHA job timeout). */
+export const DEFAULT_CODING_TASK_TIMEOUT_MS = 600_000;
+
+export const DEFAULT_WORKSPACE_ROOT = "/tmp/autodev-workspaces";
+
+export const CODING_TASK_KIND = "github_actions_coding_task";
 
 /** Short synthetic wait; tests inject a shorter value with fake timers. */
 export const DEFAULT_SYNTHETIC_NOOP_DURATION_MS = 2_000;
@@ -40,6 +47,9 @@ export interface ActuatorConfig {
   readonly heartbeatIntervalMs: number;
   readonly heartbeatFailureLimit: number;
   readonly syntheticNoopDurationMs: number;
+  readonly workspaceRoot: string;
+  readonly codingTaskTimeoutMs: number;
+  readonly cursorApiKey?: string;
 }
 
 export interface ClaimResult {

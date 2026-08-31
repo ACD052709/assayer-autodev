@@ -100,6 +100,23 @@ export function assertLeaseToken(value: unknown, field = "leaseToken"): string {
 const REPOSITORY_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const MAX_DO_NOT_MODIFY_CONSTRAINTS = 32;
 const MAX_CONSTRAINT_LENGTH = 256;
+const MAX_TEST_COMMAND_LENGTH = 256;
+const TRUSTED_TEST_COMMAND_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._/ -]{0,255}$/;
+
+export function assertOptionalTrustedTestCommand(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !TRUSTED_TEST_COMMAND_PATTERN.test(value.trim())) {
+    throw new ApiError(400, "validation_error", `Invalid ${field}`, [
+      { field, message: "Must be a short trusted shell-free command token list" },
+    ]);
+  }
+  if (value.length > MAX_TEST_COMMAND_LENGTH) {
+    throw new ApiError(400, "validation_error", `Invalid ${field}`, [{ field, message: "Too long" }]);
+  }
+  return value.trim();
+}
 
 export function assertOptionalRepositorySlug(value: unknown, field: string): string | undefined {
   if (value === undefined || value === null) {

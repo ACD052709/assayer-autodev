@@ -1,9 +1,11 @@
 import { ActuatorError } from "./errors.js";
 import { githubActionsOwnerId } from "./owner-id.js";
 import {
+  DEFAULT_CODING_TASK_TIMEOUT_MS,
   DEFAULT_HEARTBEAT_FAILURE_LIMIT,
   DEFAULT_HEARTBEAT_INTERVAL_MS,
   DEFAULT_SYNTHETIC_NOOP_DURATION_MS,
+  DEFAULT_WORKSPACE_ROOT,
   WORKER_RUN_ID_PATTERN,
   isExecutionMode,
   type ActuatorConfig,
@@ -15,6 +17,9 @@ export interface CliEnv {
   readonly GITHUB_REPOSITORY?: string;
   readonly GITHUB_RUN_ID?: string;
   readonly GITHUB_RUN_ATTEMPT?: string;
+  readonly AUTODEV_WORKSPACE_ROOT?: string;
+  readonly AUTODEV_CODING_TASK_TIMEOUT_MS?: string;
+  readonly CURSOR_API_KEY?: string;
 }
 
 const ALLOWED_FLAGS = new Set(["--worker-run-id", "--execution-mode"]);
@@ -43,7 +48,7 @@ export function parseActuatorCli(argv: string[], env: CliEnv): ActuatorConfig {
     throw new ActuatorError("invalid_config", "Invalid --worker-run-id");
   }
   if (executionMode === undefined || !isExecutionMode(executionMode)) {
-    throw new ActuatorError("invalid_config", "Unsupported --execution-mode (allowed: synthetic-noop)");
+    throw new ActuatorError("invalid_config", "Unsupported --execution-mode (allowed: synthetic-noop, coding-task)");
   }
 
   const serviceToken = env.AUTODEV_SERVICE_TOKEN?.trim();
@@ -77,5 +82,19 @@ export function parseActuatorCli(argv: string[], env: CliEnv): ActuatorConfig {
     heartbeatIntervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS,
     heartbeatFailureLimit: DEFAULT_HEARTBEAT_FAILURE_LIMIT,
     syntheticNoopDurationMs: DEFAULT_SYNTHETIC_NOOP_DURATION_MS,
+    workspaceRoot: env.AUTODEV_WORKSPACE_ROOT?.trim() || DEFAULT_WORKSPACE_ROOT,
+    codingTaskTimeoutMs: parsePositiveInt(env.AUTODEV_CODING_TASK_TIMEOUT_MS, DEFAULT_CODING_TASK_TIMEOUT_MS),
+    ...(env.CURSOR_API_KEY?.trim() ? { cursorApiKey: env.CURSOR_API_KEY.trim() } : {}),
   };
+}
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim().length === 0) {
+    return fallback;
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new ActuatorError("invalid_config", "AUTODEV_CODING_TASK_TIMEOUT_MS must be a positive integer");
+  }
+  return value;
 }

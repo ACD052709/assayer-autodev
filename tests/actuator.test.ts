@@ -29,6 +29,8 @@ const baseConfig: ActuatorConfig = {
   heartbeatIntervalMs: 100,
   heartbeatFailureLimit: 2,
   syntheticNoopDurationMs: 250,
+  workspaceRoot: "/tmp/autodev-workspaces",
+  codingTaskTimeoutMs: 60_000,
 };
 
 function capturingLogger() {
@@ -191,6 +193,15 @@ describe("parseActuatorCli", () => {
     expect(() =>
       parseActuatorCli(["--worker-run-id", WORKER_RUN_ID, "--execution-mode", "cursor-acp"], env),
     ).toThrow(/Unsupported --execution-mode/);
+  });
+
+  it("accepts coding-task executionMode", () => {
+    const config = parseActuatorCli(
+      ["--worker-run-id", WORKER_RUN_ID, "--execution-mode", "coding-task"],
+      env,
+    );
+    expect(config.executionMode).toBe("coding-task");
+    expect(config.workspaceRoot).toBe("/tmp/autodev-workspaces");
   });
 
   it("rejects arbitrary command input", () => {

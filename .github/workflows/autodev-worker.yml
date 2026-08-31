@@ -1,4 +1,4 @@
-# External GitHub Actions worker actuator (synthetic-noop only).
+# External GitHub Actions worker actuator (synthetic-noop and coding-task).
 #
 # NEXT STAGE (not implemented): a control-plane launch bridge would call
 # GitHub workflow_dispatch after the dispatcher creates a queued worker_run.
@@ -19,11 +19,12 @@ on:
         required: true
         type: string
       executionMode:
-        description: Isolated execution mode (synthetic-noop only)
+        description: Isolated execution mode
         required: true
         type: choice
         options:
           - synthetic-noop
+          - coding-task
         default: synthetic-noop
 
 permissions:
@@ -58,4 +59,5 @@ jobs:
       - name: Run worker actuator
         env:
           AUTODEV_SERVICE_TOKEN: ${{ secrets.AUTODEV_SERVICE_TOKEN }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
         run: npm run actuator -- --worker-run-id "${{ github.event.inputs.workerRunId }}" --execution-mode "${{ github.event.inputs.executionMode }}"

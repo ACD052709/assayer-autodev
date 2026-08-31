@@ -69,6 +69,7 @@ export async function buildWorkerTaskPacket(
     doNotModifyConstraints: [...project.doNotModifyConstraints],
     ...(project.targetRepository !== undefined ? { targetRepository: project.targetRepository } : {}),
     ...(project.targetRef !== undefined ? { targetRef: project.targetRef } : {}),
+    ...(project.targetTestCommand !== undefined ? { targetTestCommand: project.targetTestCommand } : {}),
     execution: {
       workerKind: workerRun.workerKind,
       iteration: workerRun.iteration,

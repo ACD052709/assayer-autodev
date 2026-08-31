@@ -32,5 +32,6 @@ export interface WorkerTaskPacket {
   readonly doNotModifyConstraints: readonly string[];
   readonly targetRepository?: string;
   readonly targetRef?: string;
+  readonly targetTestCommand?: string;
   readonly execution: WorkerTaskPacketExecution;
 }

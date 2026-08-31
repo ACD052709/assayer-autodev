@@ -54,6 +54,7 @@ import {
   assertNonEmptyString,
   assertObject,
   assertOptionalRepositorySlug,
+  assertOptionalTrustedTestCommand,
   rejectUnknownKeys,
   validators,
 } from "./validation.js";
@@ -369,10 +370,12 @@ async function handlePostProject(request: Request, deps: ApiDependencies): Promi
     "description",
     "targetRepository",
     "targetRef",
+    "targetTestCommand",
     "doNotModifyConstraints",
   ]);
   const targetRepository = assertOptionalRepositorySlug(body.targetRepository, "targetRepository");
   const targetRef = assertOptionalNonEmptyString(body.targetRef, "targetRef");
+  const targetTestCommand = assertOptionalTrustedTestCommand(body.targetTestCommand, "targetTestCommand");
   const doNotModifyConstraints = assertDoNotModifyConstraints(
     body.doNotModifyConstraints,
     "doNotModifyConstraints",
@@ -383,6 +386,7 @@ async function handlePostProject(request: Request, deps: ApiDependencies): Promi
     description: assertNonEmptyString(body.description, "description"),
     ...(targetRepository !== undefined ? { targetRepository } : {}),
     ...(targetRef !== undefined ? { targetRef } : {}),
+    ...(targetTestCommand !== undefined ? { targetTestCommand } : {}),
     ...(doNotModifyConstraints !== undefined ? { doNotModifyConstraints } : {}),
   });
   return jsonResponse({ project }, 201);
