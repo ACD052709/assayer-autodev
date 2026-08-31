@@ -12,7 +12,10 @@ import {
   WorkerReportValidationError,
 } from "../dispatch/index.js";
 import {
+  assertTaskVerificationDecision,
   createWorkerRunLifecycle,
+  TaskVerificationError,
+  verifyTaskResult,
   WorkerRunLifecycle,
   WorkerRunLifecycleError,
   type StructuredOutcome,
@@ -208,6 +211,19 @@ function mapLifecycleError(error: WorkerRunLifecycleError): ApiError {
   return new ApiError(409, "conflict", error.message);
 }
 
+function mapTaskVerificationError(error: TaskVerificationError): ApiError {
+  if (error.code === "not_found") {
+    return new ApiError(404, "not_found", error.message);
+  }
+  if (error.code === "validation") {
+    return new ApiError(400, "validation_error", error.message);
+  }
+  if (error.code === "inconsistent") {
+    return new ApiError(409, "conflict", error.message);
+  }
+  return new ApiError(409, "conflict", error.message);
+}
+
 function assertStructuredOutcome(value: unknown, field: string): StructuredOutcome | undefined {
   const obj = assertOptionalObject(value, field);
   if (obj === undefined) {
@@ -285,6 +301,36 @@ async function handleGetTask(
     throw new ApiError(404, "not_found", `Task not found: ${taskId}`);
   }
   return jsonResponse({ task });
+}
+
+async function handlePostTaskVerify(
+  params: Record<string, string>,
+  request: Request,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const taskId = assertEntityId(params.taskId, "taskId");
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, ["decision", "summary"]);
+  try {
+    const decision = assertTaskVerificationDecision(
+      assertNonEmptyString(body.decision, "decision"),
+    );
+    const summary = assertOptionalNonEmptyString(body.summary, "summary");
+    const result = await verifyTaskResult(
+      taskId,
+      {
+        decision,
+        ...(summary !== undefined ? { summary } : {}),
+      },
+      { store: deps.store },
+    );
+    return jsonResponse({ task: result.task, inboxItem: result.inboxItem });
+  } catch (error) {
+    if (error instanceof TaskVerificationError) {
+      throw mapTaskVerificationError(error);
+    }
+    throw error;
+  }
 }
 
 async function handleGetTaskEvidence(
@@ -1093,6 +1139,12 @@ const routes: readonly {
     pattern: "/api/tasks/:taskId/evidence",
     policy: READ_POLICY,
     handler: (_request, params, deps) => handleGetTaskEvidence(params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/tasks/:taskId/verify",
+    policy: MASTER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostTaskVerify(params, request, deps),
   },
   {
     method: "GET",

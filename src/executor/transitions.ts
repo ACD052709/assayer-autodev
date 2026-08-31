@@ -49,6 +49,20 @@ export function taskStatusForRetry(): { from: readonly TaskStatus[]; to: TaskSta
   return { from: ["failed"], to: "assigned" };
 }
 
+export function taskStatusForVerificationAccept(): {
+  from: readonly TaskStatus[];
+  to: TaskStatus;
+} {
+  return { from: ["awaiting_verification"], to: "completed" };
+}
+
+export function taskStatusForVerificationReject(): {
+  from: readonly TaskStatus[];
+  to: TaskStatus;
+} {
+  return { from: ["awaiting_verification"], to: "failed" };
+}
+
 export function taskStatusForCancel(fromRun: WorkerRunStatus): {
   from: readonly TaskStatus[];
   to: TaskStatus;

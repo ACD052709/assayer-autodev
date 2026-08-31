@@ -25,6 +25,8 @@ export {
   taskStatusForCancel,
   taskStatusForTimeout,
   taskStatusForRetry,
+  taskStatusForVerificationAccept,
+  taskStatusForVerificationReject,
 } from "./transitions.js";
 export {
   LIFECYCLE_EVENTS,
@@ -33,7 +35,18 @@ export {
   workerReportIdForRun,
   type WorkerRunLifecycleEventName,
 } from "./events.js";
-export { WorkerRunLifecycleError } from "./errors.js";
+export {
+  TaskVerificationError,
+  WorkerRunLifecycleError,
+} from "./errors.js";
+export {
+  assertTaskVerificationDecision,
+  verifyTaskResult,
+  type TaskVerificationDecision,
+  type VerifyTaskResultInput,
+  type VerifyTaskResultOptions,
+  type VerifyTaskResultResult,
+} from "./task-verification.js";
 export {
   DEFAULT_LEASE_DURATION_MS,
   DEFAULT_MAX_ATTEMPTS,

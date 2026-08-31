@@ -120,6 +120,19 @@ describe("Worker-run lifecycle API", () => {
     expect(succeeded.task.status).toBe("awaiting_verification");
     expect(succeeded.report.outcome).toBe("success");
     expect(succeeded.inboxItem.kind).toBe("worker_report");
+
+    const verify = await request(router, "POST", "/api/tasks/task-exec-api/verify", {
+      decision: "accept",
+      summary: "Evidence reviewed",
+    });
+    expect(verify.status).toBe(200);
+    const verified = (await verify.json()) as {
+      task: { status: string };
+      inboxItem: { kind: string; subject: string };
+    };
+    expect(verified.task.status).toBe("completed");
+    expect(verified.inboxItem.kind).toBe("task_update");
+    expect(verified.inboxItem.subject).toBe("Task verification accepted");
   });
 
   it("fails a claimed run via the fail route", async () => {
