@@ -1,4 +1,5 @@
 import { createApiRouter } from "../api/index.js";
+import { createWorkerDispatcher } from "../dispatch/index.js";
 import { R2EvidenceBlobStore } from "../evidence/index.js";
 import { createMasterOrchestrator, OpenAIMasterModelClient } from "../master/index.js";
 import { createD1StateStore } from "../state/d1-store.js";
@@ -16,10 +17,12 @@ export default {
             client: new OpenAIMasterModelClient({ apiKey: openaiKey }),
           })
         : undefined;
+    const taskDispatcher = createWorkerDispatcher({ store });
     const router = createApiRouter({
       deps: {
         store,
         blobs,
+        taskDispatcher,
         ...(masterOrchestrator !== undefined ? { masterOrchestrator } : {}),
       },
       auth: {

@@ -22,6 +22,7 @@ import type {
   CreateTestCaseInput,
   CreateTestResultInput,
   CreateVerifierRunInput,
+  AssignTaskToWorkerRunInput,
   CreateWorkerEventInput,
   CreateWorkerReportInput,
   CreateWorkerRunInput,
@@ -45,6 +46,7 @@ import type {
   Task,
   TaskDependency,
   TestCase,
+  TaskWorkerAssignment,
   TestResult,
   UpdateAcceptanceCriterionInput,
   VerifierRun,
@@ -81,6 +83,13 @@ export interface StateStore {
   // Workers
   createWorkerRun(input: CreateWorkerRunInput): WorkerRun;
   getWorkerRun(id: EntityId): WorkerRun | undefined;
+  listWorkerRunsByProject(projectId: EntityId): readonly WorkerRun[];
+  /**
+   * Insert a worker_run and point the task at it in one step.
+   * Returns undefined when the task is missing, cross-project, or not eligible.
+   * If the task is already assigned, returns the existing assignment with `created: false`.
+   */
+  assignTaskToWorkerRun(input: AssignTaskToWorkerRunInput): TaskWorkerAssignment | undefined;
   updateWorkerRunStatus(
     workerRunId: EntityId,
     status: WorkerRun["status"],
@@ -92,6 +101,7 @@ export interface StateStore {
 
   createWorkerReport(input: CreateWorkerReportInput): WorkerReport;
   getWorkerReport(id: EntityId): WorkerReport | undefined;
+  getWorkerReportByWorkerRunId(workerRunId: EntityId): WorkerReport | undefined;
 
   // Tests
   createTestCase(input: CreateTestCaseInput): TestCase;

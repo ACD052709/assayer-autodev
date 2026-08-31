@@ -5,6 +5,13 @@ import { evidenceBlobKey } from "../evidence/index.js";
 import type { MasterOrchestrator } from "../master/index.js";
 import { MasterModelConfigError } from "../master/index.js";
 import {
+  createWorkerDispatcher,
+  DispatchValidationError,
+  normalizeMaxAssignments,
+  WorkerDispatcher,
+  WorkerReportValidationError,
+} from "../dispatch/index.js";
+import {
   BudgetResourceConflictError,
   expectedBudgetUnit,
   listBudgetResourceViews,
@@ -43,6 +50,7 @@ export interface ApiDependencies {
   store: AsyncStateStore;
   blobs: EvidenceBlobStore;
   masterOrchestrator?: MasterOrchestrator;
+  taskDispatcher?: WorkerDispatcher;
 }
 
 export interface ApiRouterOptions {
@@ -160,6 +168,23 @@ function matchRoute(pathname: string, pattern: string): Record<string, string> |
     }
   }
   return params;
+}
+
+function dispatcherFor(deps: ApiDependencies): WorkerDispatcher {
+  return deps.taskDispatcher ?? createWorkerDispatcher({ store: deps.store });
+}
+
+function assertOptionalInteger(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const n = assertFiniteNumber(value, field);
+  if (!Number.isInteger(n)) {
+    throw new ApiError(400, "validation_error", `Invalid ${field}`, [
+      { field, message: "Must be an integer" },
+    ]);
+  }
+  return n;
 }
 
 async function requireProject(store: AsyncStateStore, projectId: string) {
@@ -341,16 +366,32 @@ async function handlePostWorkerReport(request: Request, deps: ApiDependencies): 
     throw new ApiError(404, "not_found", `Worker run not found: ${workerRunId}`);
   }
   const metrics = assertNumberRecord(body.metrics, "metrics");
-  const report = await deps.store.createWorkerReport({
-    id: assertEntityId(body.id, "id"),
-    projectId,
-    taskId,
-    workerRunId,
-    summary: assertNonEmptyString(body.summary, "summary"),
-    outcome: validators.workerReportOutcome(body.outcome, "outcome") as WorkerReport["outcome"],
-    ...(metrics !== undefined ? { metrics } : {}),
-  });
-  return jsonResponse({ report }, 201);
+  try {
+    const result = await dispatcherFor(deps).persistWorkerReport({
+      id: assertEntityId(body.id, "id"),
+      projectId,
+      taskId,
+      workerRunId,
+      summary: assertNonEmptyString(body.summary, "summary"),
+      outcome: validators.workerReportOutcome(body.outcome, "outcome") as WorkerReport["outcome"],
+      ...(metrics !== undefined ? { metrics } : {}),
+    });
+    return jsonResponse(
+      { report: result.report, inboxItem: result.inboxItem, created: result.created },
+      result.created ? 201 : 200,
+    );
+  } catch (error) {
+    if (error instanceof WorkerReportValidationError) {
+      if (error.code === "not_found") {
+        throw new ApiError(404, "not_found", error.message);
+      }
+      if (error.code === "conflict") {
+        throw new ApiError(409, "conflict", error.message);
+      }
+      throw new ApiError(400, "validation_error", error.message);
+    }
+    throw error;
+  }
 }
 
 async function handlePostTestResult(request: Request, deps: ApiDependencies): Promise<Response> {
@@ -736,6 +777,56 @@ async function handleGetProjectBudget(
   return jsonResponse({ budget });
 }
 
+async function handlePostProjectDispatch(
+  request: Request,
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const projectId = assertEntityId(params.projectId, "projectId");
+  await requireProject(deps.store, projectId);
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, ["maxAssignments"]);
+  const maxAssignments = assertOptionalInteger(body.maxAssignments, "maxAssignments");
+  try {
+    if (maxAssignments !== undefined) {
+      normalizeMaxAssignments(maxAssignments);
+    }
+    const result = await dispatcherFor(deps).dispatch(projectId, {
+      ...(maxAssignments !== undefined ? { maxAssignments } : {}),
+    });
+    return jsonResponse({ assignments: result.assignments });
+  } catch (error) {
+    if (error instanceof DispatchValidationError) {
+      throw new ApiError(400, "validation_error", `Invalid ${error.field}`, [
+        { field: error.field, message: error.message },
+      ]);
+    }
+    throw error;
+  }
+}
+
+async function handleGetProjectWorkerRuns(
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const projectId = assertEntityId(params.projectId, "projectId");
+  await requireProject(deps.store, projectId);
+  const workerRuns = await deps.store.listWorkerRunsByProject(projectId);
+  return jsonResponse({ workerRuns });
+}
+
+async function handleGetWorkerRun(
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const workerRunId = assertEntityId(params.workerRunId, "workerRunId");
+  const workerRun = await deps.store.getWorkerRun(workerRunId);
+  if (workerRun === undefined) {
+    throw new ApiError(404, "not_found", `Worker run not found: ${workerRunId}`);
+  }
+  return jsonResponse({ workerRun });
+}
+
 const routes: readonly {
   method: string;
   pattern: string;
@@ -880,6 +971,24 @@ const routes: readonly {
     pattern: "/api/projects/:projectId/budgets/:budgetId",
     policy: READ_POLICY,
     handler: (_request, params, deps) => handleGetProjectBudget(params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:projectId/dispatch",
+    policy: MASTER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostProjectDispatch(request, params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:projectId/worker-runs",
+    policy: READ_POLICY,
+    handler: (_request, params, deps) => handleGetProjectWorkerRuns(params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/worker-runs/:workerRunId",
+    policy: READ_POLICY,
+    handler: (_request, params, deps) => handleGetWorkerRun(params, deps),
   },
 ];
 

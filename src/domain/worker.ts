@@ -1,4 +1,5 @@
 import type { EntityId, ISOTimestamp, Provenance, StatusRecord, Timestamps } from "./common.js";
+import type { Task } from "./task.js";
 
 export type WorkerKind = "cursor_acp" | "playwright" | "verifier" | "generic";
 
@@ -69,4 +70,19 @@ export interface CreateWorkerReportInput {
   readonly summary: string;
   readonly outcome: WorkerReport["outcome"];
   readonly metrics?: Record<string, number>;
+}
+
+export interface AssignTaskToWorkerRunInput {
+  readonly id: EntityId;
+  readonly projectId: EntityId;
+  readonly taskId: EntityId;
+  readonly workerKind: WorkerKind;
+  readonly iteration?: number;
+}
+
+/** Result of assigning a worker_run to a task. `created` is false when the task was already assigned. */
+export interface TaskWorkerAssignment {
+  readonly task: Task;
+  readonly workerRun: WorkerRun;
+  readonly created: boolean;
 }

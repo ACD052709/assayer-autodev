@@ -24,6 +24,7 @@ import type {
   CreateTestCaseInput,
   CreateTestResultInput,
   CreateVerifierRunInput,
+  AssignTaskToWorkerRunInput,
   CreateWorkerEventInput,
   CreateWorkerReportInput,
   CreateWorkerRunInput,
@@ -46,6 +47,7 @@ import type {
   Requirement,
   Task,
   TaskDependency,
+  TaskWorkerAssignment,
   TestCase,
   TestResult,
   UpdateAcceptanceCriterionInput,
@@ -66,6 +68,11 @@ function sumUsage(entries: readonly BudgetEntry[], category: BudgetCategory): nu
   return entries
     .filter((e) => e.category === category)
     .reduce((sum, e) => sum + e.amount, 0);
+}
+
+function compareWorkerRuns(a: WorkerRun, b: WorkerRun): number {
+  const byTime = a.createdAt.localeCompare(b.createdAt);
+  return byTime !== 0 ? byTime : a.id.localeCompare(b.id);
 }
 
 export class InMemoryStateStore implements StateStore {
@@ -232,6 +239,47 @@ export class InMemoryStateStore implements StateStore {
     return this.workerRuns.get(id);
   }
 
+  listWorkerRunsByProject(projectId: EntityId): readonly WorkerRun[] {
+    return [...this.workerRuns.values()]
+      .filter((run) => run.projectId === projectId)
+      .sort(compareWorkerRuns);
+  }
+
+  assignTaskToWorkerRun(input: AssignTaskToWorkerRunInput): TaskWorkerAssignment | undefined {
+    const task = this.tasks.get(input.taskId);
+    if (task === undefined || task.projectId !== input.projectId) {
+      return undefined;
+    }
+    if (task.assignedWorkerRunId !== undefined) {
+      const existing = this.workerRuns.get(task.assignedWorkerRunId);
+      if (existing === undefined) {
+        return undefined;
+      }
+      return { task, workerRun: existing, created: false };
+    }
+    if (task.status !== "pending" && task.status !== "ready") {
+      return undefined;
+    }
+
+    const existingForTask = [...this.workerRuns.values()].filter((run) => run.taskId === task.id);
+    const workerRun = this.createWorkerRun({
+      id: input.id,
+      projectId: input.projectId,
+      taskId: input.taskId,
+      workerKind: input.workerKind,
+      iteration: input.iteration ?? existingForTask.length + 1,
+    });
+    const at = nowIso();
+    const updated: Task = {
+      ...task,
+      assignedWorkerRunId: workerRun.id,
+      ...withStatus("assigned", at),
+      ...touchTimestamps(task, at),
+    };
+    this.tasks.set(task.id, updated);
+    return { task: updated, workerRun, created: true };
+  }
+
   updateWorkerRunStatus(
     workerRunId: EntityId,
     status: WorkerRun["status"],
@@ -293,6 +341,15 @@ export class InMemoryStateStore implements StateStore {
 
   getWorkerReport(id: EntityId): WorkerReport | undefined {
     return this.workerReports.get(id);
+  }
+
+  getWorkerReportByWorkerRunId(workerRunId: EntityId): WorkerReport | undefined {
+    return [...this.workerReports.values()]
+      .filter((report) => report.workerRunId === workerRunId)
+      .sort((a, b) => {
+        const byTime = a.createdAt.localeCompare(b.createdAt);
+        return byTime !== 0 ? byTime : a.id.localeCompare(b.id);
+      })[0];
   }
 
   createTestCase(input: CreateTestCaseInput): TestCase {

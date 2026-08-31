@@ -80,6 +80,40 @@ describe("D1StateStore", () => {
     });
     expect(report.workerRunId).toBe("run-1");
     expect((await store.listWorkerEvents("run-1"))).toHaveLength(1);
+    expect((await store.getWorkerReportByWorkerRunId("run-1"))?.id).toBe("rep-1");
+  });
+
+  it("assigns a worker run to a task without creating a duplicate", async () => {
+    await store.createProject({ id: projectId, name: "P", description: "P" });
+    await store.createTask({
+      id: "task-assign",
+      projectId,
+      title: "Assign",
+      description: "",
+      kind: "implementation",
+    });
+
+    const first = await store.assignTaskToWorkerRun({
+      id: "wrun-assign-1",
+      projectId,
+      taskId: "task-assign",
+      workerKind: "generic",
+    });
+    expect(first?.created).toBe(true);
+    expect(first?.task.status).toBe("assigned");
+    expect(first?.task.assignedWorkerRunId).toBe("wrun-assign-1");
+    expect(first?.workerRun.status).toBe("queued");
+
+    const second = await store.assignTaskToWorkerRun({
+      id: "wrun-assign-2",
+      projectId,
+      taskId: "task-assign",
+      workerKind: "generic",
+    });
+    expect(second?.created).toBe(false);
+    expect(second?.workerRun.id).toBe("wrun-assign-1");
+    expect(await store.listWorkerRunsByProject(projectId)).toHaveLength(1);
+    expect(await store.getWorkerReportByWorkerRunId("wrun-assign-1")).toBeUndefined();
   });
 
   it("records verification outcomes", async () => {

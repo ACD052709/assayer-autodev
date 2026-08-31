@@ -26,6 +26,7 @@ import type {
   CreateTestCaseInput,
   CreateTestResultInput,
   CreateVerifierRunInput,
+  AssignTaskToWorkerRunInput,
   CreateWorkerEventInput,
   CreateWorkerReportInput,
   CreateWorkerRunInput,
@@ -52,6 +53,7 @@ import type {
   Requirement,
   Task,
   TaskDependency,
+  TaskWorkerAssignment,
   TestCase,
   TestResult,
   UpdateAcceptanceCriterionInput,
@@ -1040,6 +1042,97 @@ export class D1StateStore implements AsyncStateStore {
     return row ? rowToWorkerRun(row) : undefined;
   }
 
+  async listWorkerRunsByProject(projectId: EntityId): Promise<readonly WorkerRun[]> {
+    const result = await this.db
+      .prepare(`SELECT * FROM worker_runs WHERE project_id = ? ORDER BY created_at ASC, id ASC`)
+      .bind(projectId)
+      .all<WorkerRunRow>();
+    return (result.results ?? []).map(rowToWorkerRun);
+  }
+
+  async assignTaskToWorkerRun(input: AssignTaskToWorkerRunInput): Promise<TaskWorkerAssignment | undefined> {
+    const task = await this.getTask(input.taskId);
+    if (task === undefined || task.projectId !== input.projectId) {
+      return undefined;
+    }
+    if (task.assignedWorkerRunId !== undefined) {
+      const existing = await this.getWorkerRun(task.assignedWorkerRunId);
+      if (existing === undefined) {
+        return undefined;
+      }
+      return { task, workerRun: existing, created: false };
+    }
+    if (task.status !== "pending" && task.status !== "ready") {
+      return undefined;
+    }
+
+    const countRow = await this.db
+      .prepare(`SELECT COUNT(*) AS n FROM worker_runs WHERE task_id = ?`)
+      .bind(input.taskId)
+      .first<{ n: number }>();
+    const iteration = input.iteration ?? (Number(countRow?.n ?? 0) + 1);
+    const ts = createTimestamps();
+    const run: WorkerRun = {
+      id: input.id,
+      projectId: input.projectId,
+      taskId: input.taskId,
+      workerKind: input.workerKind,
+      iteration,
+      ...ts,
+      ...withStatus("queued"),
+    };
+    const at = ts.updatedAt;
+
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `INSERT INTO worker_runs
+           (id, project_id, task_id, worker_kind, iteration, status, status_changed_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          run.id,
+          run.projectId,
+          run.taskId,
+          run.workerKind,
+          run.iteration,
+          run.status,
+          run.statusChangedAt,
+          run.createdAt,
+          run.updatedAt,
+        ),
+      this.db
+        .prepare(
+          `UPDATE tasks
+           SET assigned_worker_run_id = ?, status = ?, status_changed_at = ?, updated_at = ?
+           WHERE id = ?
+             AND project_id = ?
+             AND assigned_worker_run_id IS NULL
+             AND status IN ('pending', 'ready')`,
+        )
+        .bind(run.id, "assigned", at, at, input.taskId, input.projectId),
+    ]);
+
+    const updatedRows = results[1]?.meta.changes ?? 0;
+    if (updatedRows > 0) {
+      const updated = await this.getTask(input.taskId);
+      if (updated === undefined) {
+        return undefined;
+      }
+      return { task: updated, workerRun: run, created: true };
+    }
+
+    await this.db.prepare(`DELETE FROM worker_runs WHERE id = ?`).bind(run.id).run();
+    const current = await this.getTask(input.taskId);
+    if (current?.assignedWorkerRunId !== undefined) {
+      const existing = await this.getWorkerRun(current.assignedWorkerRunId);
+      if (existing !== undefined) {
+        return { task: current, workerRun: existing, created: false };
+      }
+    }
+    return undefined;
+  }
+
   async updateWorkerRunStatus(
     workerRunId: EntityId,
     status: WorkerRun["status"],
@@ -1158,6 +1251,16 @@ export class D1StateStore implements AsyncStateStore {
     const row = await this.db
       .prepare(`SELECT * FROM worker_reports WHERE id = ?`)
       .bind(id)
+      .first<WorkerReportRow>();
+    return row ? rowToWorkerReport(row) : undefined;
+  }
+
+  async getWorkerReportByWorkerRunId(workerRunId: EntityId): Promise<WorkerReport | undefined> {
+    const row = await this.db
+      .prepare(
+        `SELECT * FROM worker_reports WHERE worker_run_id = ? ORDER BY created_at ASC, id ASC LIMIT 1`,
+      )
+      .bind(workerRunId)
       .first<WorkerReportRow>();
     return row ? rowToWorkerReport(row) : undefined;
   }
