@@ -74,6 +74,7 @@ export interface ControlPlaneClient {
   heartbeat(workerRunId: string, leaseToken: string): Promise<HeartbeatResult>;
   succeed(workerRunId: string, leaseToken: string, input: SucceedInput): Promise<TerminalResult>;
   fail(workerRunId: string, leaseToken: string, input: FailInput): Promise<TerminalResult>;
+  getTaskPacket(workerRunId: string, leaseToken: string): Promise<import("../domain/worker-task-packet.js").WorkerTaskPacket>;
 }
 
 export interface ActuatorLogger {

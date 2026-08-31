@@ -17,6 +17,7 @@ import type {
   CreateMasterRunInput,
   CreatePermissionRequestInput,
   CreateProjectInput,
+  UpdateProjectWorkerTargetInput,
   CreateReleaseContractInput,
   CreateRequirementInput,
   CreateTaskDependencyInput,
@@ -127,6 +128,9 @@ export class InMemoryStateStore implements StateStore {
       id: input.id,
       name: input.name,
       description: input.description,
+      doNotModifyConstraints: [...(input.doNotModifyConstraints ?? [])],
+      ...(input.targetRepository !== undefined ? { targetRepository: input.targetRepository } : {}),
+      ...(input.targetRef !== undefined ? { targetRef: input.targetRef } : {}),
       ...ts,
       ...withStatus("active"),
     };
@@ -140,6 +144,24 @@ export class InMemoryStateStore implements StateStore {
 
   listProjects(): readonly Project[] {
     return [...this.projects.values()];
+  }
+
+  updateProjectWorkerTarget(input: UpdateProjectWorkerTargetInput): Project {
+    const existing = this.projects.get(input.projectId);
+    if (existing === undefined) {
+      throw new Error(`Project not found: ${input.projectId}`);
+    }
+    const updated: Project = {
+      ...existing,
+      ...(input.targetRepository !== undefined ? { targetRepository: input.targetRepository } : {}),
+      ...(input.targetRef !== undefined ? { targetRef: input.targetRef } : {}),
+      ...(input.doNotModifyConstraints !== undefined
+        ? { doNotModifyConstraints: [...input.doNotModifyConstraints] }
+        : {}),
+      ...touchTimestamps(existing),
+    };
+    this.projects.set(input.projectId, updated);
+    return updated;
   }
 
   createRequirement(input: CreateRequirementInput): Requirement {

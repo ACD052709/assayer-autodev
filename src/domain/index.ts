@@ -3,6 +3,7 @@ export * from "./project.js";
 export * from "./requirement.js";
 export * from "./task.js";
 export * from "./worker.js";
+export * from "./worker-task-packet.js";
 export * from "./test.js";
 export * from "./evidence.js";
 export * from "./permission.js";

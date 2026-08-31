@@ -48,13 +48,18 @@ import {
   readJsonBody,
 } from "./security/index.js";
 import {
+  assertDoNotModifyConstraints,
   assertEntityId,
   assertLeaseToken,
   assertNonEmptyString,
   assertObject,
+  assertOptionalRepositorySlug,
   rejectUnknownKeys,
   validators,
 } from "./validation.js";
+import { buildWorkerTaskPacket } from "../worker/task-packet.js";
+import { hashLeaseToken } from "../executor/lease.js";
+import { nowIso } from "../domain/common.js";
 
 export interface ApiDependencies {
   store: AsyncStateStore;
@@ -358,11 +363,27 @@ async function handleGetMasterInbox(request: Request, deps: ApiDependencies): Pr
 
 async function handlePostProject(request: Request, deps: ApiDependencies): Promise<Response> {
   const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
-  rejectUnknownKeys(body, ["id", "name", "description"]);
+  rejectUnknownKeys(body, [
+    "id",
+    "name",
+    "description",
+    "targetRepository",
+    "targetRef",
+    "doNotModifyConstraints",
+  ]);
+  const targetRepository = assertOptionalRepositorySlug(body.targetRepository, "targetRepository");
+  const targetRef = assertOptionalNonEmptyString(body.targetRef, "targetRef");
+  const doNotModifyConstraints = assertDoNotModifyConstraints(
+    body.doNotModifyConstraints,
+    "doNotModifyConstraints",
+  );
   const project = await deps.store.createProject({
     id: assertEntityId(body.id, "id"),
     name: assertNonEmptyString(body.name, "name"),
     description: assertNonEmptyString(body.description, "description"),
+    ...(targetRepository !== undefined ? { targetRepository } : {}),
+    ...(targetRef !== undefined ? { targetRef } : {}),
+    ...(doNotModifyConstraints !== undefined ? { doNotModifyConstraints } : {}),
   });
   return jsonResponse({ project }, 201);
 }
@@ -929,6 +950,37 @@ async function handleGetWorkerRun(
   return jsonResponse({ workerRun });
 }
 
+async function handleGetWorkerRunTaskPacket(
+  request: Request,
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const workerRunId = assertEntityId(params.workerRunId, "workerRunId");
+  const leaseToken = assertLeaseToken(new URL(request.url).searchParams.get("leaseToken"), "leaseToken");
+  const workerRun = await deps.store.getWorkerRun(workerRunId);
+  if (workerRun === undefined) {
+    throw new ApiError(404, "not_found", `Worker run not found: ${workerRunId}`);
+  }
+  const verification = await deps.store.verifyWorkerRunLease(
+    workerRunId,
+    await hashLeaseToken(leaseToken),
+    nowIso(),
+  );
+  if (!verification.ok) {
+    if (verification.reason === "not_found") {
+      throw new ApiError(404, "not_found", `Worker run not found: ${workerRunId}`);
+    }
+    throw new ApiError(403, "forbidden", "Lease token is not valid for this worker run");
+  }
+  try {
+    const packet = await buildWorkerTaskPacket(deps.store, workerRun);
+    return jsonResponse({ packet });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to build worker task packet";
+    throw new ApiError(409, "conflict", message);
+  }
+}
+
 async function handlePostWorkerRunClaim(
   params: Record<string, string>,
   request: Request,
@@ -1283,6 +1335,12 @@ const routes: readonly {
     pattern: "/api/worker-runs/:workerRunId",
     policy: READ_POLICY,
     handler: (_request, params, deps) => handleGetWorkerRun(params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/worker-runs/:workerRunId/task-packet",
+    policy: READ_POLICY,
+    handler: (request, params, deps) => handleGetWorkerRunTaskPacket(request, params, deps),
   },
   {
     method: "POST",

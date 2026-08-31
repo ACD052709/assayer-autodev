@@ -97,6 +97,44 @@ export function assertLeaseToken(value: unknown, field = "leaseToken"): string {
   return value;
 }
 
+const REPOSITORY_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const MAX_DO_NOT_MODIFY_CONSTRAINTS = 32;
+const MAX_CONSTRAINT_LENGTH = 256;
+
+export function assertOptionalRepositorySlug(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !REPOSITORY_SLUG_PATTERN.test(value)) {
+    throw new ApiError(400, "validation_error", `Invalid ${field}`, [
+      { field, message: "Must be owner/repo" },
+    ]);
+  }
+  return value;
+}
+
+export function assertDoNotModifyConstraints(value: unknown, field: string): readonly string[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new ApiError(400, "validation_error", `Invalid ${field}`, [{ field, message: "Must be an array" }]);
+  }
+  if (value.length > MAX_DO_NOT_MODIFY_CONSTRAINTS) {
+    throw new ApiError(400, "validation_error", `Invalid ${field}`, [{ field, message: "Too many constraints" }]);
+  }
+  const constraints: string[] = [];
+  for (const [index, entry] of value.entries()) {
+    if (typeof entry !== "string" || entry.trim().length === 0 || entry.length > MAX_CONSTRAINT_LENGTH) {
+      throw new ApiError(400, "validation_error", `Invalid ${field}[${index}]`, [
+        { field: `${field}[${index}]`, message: "Must be a non-empty string" },
+      ]);
+    }
+    constraints.push(entry.trim());
+  }
+  return constraints;
+}
+
 export function assertEnum<T extends string>(value: unknown, field: string, allowed: ReadonlySet<T>): T {
   if (typeof value !== "string" || !allowed.has(value as T)) {
     throw new ApiError(400, "validation_error", `Invalid ${field}`, [

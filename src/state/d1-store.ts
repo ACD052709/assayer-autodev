@@ -19,6 +19,7 @@ import type {
   CreateMasterRunInput,
   CreatePermissionRequestInput,
   CreateProjectInput,
+  UpdateProjectWorkerTargetInput,
   CreateReleaseContractInput,
   CreateRequirementInput,
   CreateTaskDependencyInput,
@@ -110,6 +111,9 @@ interface ProjectRow {
   status_changed_at: string;
   created_at: string;
   updated_at: string;
+  target_repository: string | null;
+  target_ref: string | null;
+  do_not_modify_constraints_json: string;
 }
 
 interface RequirementRow {
@@ -404,11 +408,28 @@ interface MasterRunRow {
   updated_at: string;
 }
 
+function parseDoNotModifyConstraintsJson(value: string): readonly string[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((entry): entry is string => typeof entry === "string");
+  } catch {
+    return [];
+  }
+}
+
 function rowToProject(row: ProjectRow): Project {
+  const targetRepository = optionalString(row.target_repository);
+  const targetRef = optionalString(row.target_ref);
   return {
     id: row.id,
     name: row.name,
     description: row.description,
+    doNotModifyConstraints: parseDoNotModifyConstraintsJson(row.do_not_modify_constraints_json),
+    ...(targetRepository !== undefined ? { targetRepository } : {}),
+    ...(targetRef !== undefined ? { targetRef } : {}),
     status: row.status as Project["status"],
     statusChangedAt: row.status_changed_at,
     createdAt: row.created_at,
@@ -813,13 +834,18 @@ export class D1StateStore implements AsyncStateStore {
       id: input.id,
       name: input.name,
       description: input.description,
+      doNotModifyConstraints: [...(input.doNotModifyConstraints ?? [])],
+      ...(input.targetRepository !== undefined ? { targetRepository: input.targetRepository } : {}),
+      ...(input.targetRef !== undefined ? { targetRef: input.targetRef } : {}),
       ...ts,
       ...withStatus("active"),
     };
     await this.db
       .prepare(
-        `INSERT INTO projects (id, name, description, status, status_changed_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO projects
+         (id, name, description, status, status_changed_at, created_at, updated_at,
+          target_repository, target_ref, do_not_modify_constraints_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         project.id,
@@ -829,6 +855,9 @@ export class D1StateStore implements AsyncStateStore {
         project.statusChangedAt,
         project.createdAt,
         project.updatedAt,
+        project.targetRepository ?? null,
+        project.targetRef ?? null,
+        JSON.stringify(project.doNotModifyConstraints),
       )
       .run();
     return project;
@@ -845,6 +874,37 @@ export class D1StateStore implements AsyncStateStore {
   async listProjects(): Promise<readonly Project[]> {
     const result = await this.db.prepare(`SELECT * FROM projects`).all<ProjectRow>();
     return (result.results ?? []).map(rowToProject);
+  }
+
+  async updateProjectWorkerTarget(input: UpdateProjectWorkerTargetInput): Promise<Project> {
+    const existing = await this.getProject(input.projectId);
+    if (existing === undefined) {
+      throw new Error(`Project not found: ${input.projectId}`);
+    }
+    const updated: Project = {
+      ...existing,
+      ...(input.targetRepository !== undefined ? { targetRepository: input.targetRepository } : {}),
+      ...(input.targetRef !== undefined ? { targetRef: input.targetRef } : {}),
+      ...(input.doNotModifyConstraints !== undefined
+        ? { doNotModifyConstraints: [...input.doNotModifyConstraints] }
+        : {}),
+      ...touchTimestamps(existing),
+    };
+    await this.db
+      .prepare(
+        `UPDATE projects
+         SET target_repository = ?, target_ref = ?, do_not_modify_constraints_json = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .bind(
+        updated.targetRepository ?? null,
+        updated.targetRef ?? null,
+        JSON.stringify(updated.doNotModifyConstraints),
+        updated.updatedAt,
+        input.projectId,
+      )
+      .run();
+    return updated;
   }
 
   async createRequirement(input: CreateRequirementInput): Promise<Requirement> {

@@ -15,6 +15,7 @@ import type {
   CreateMasterRunInput,
   CreatePermissionRequestInput,
   CreateProjectInput,
+  UpdateProjectWorkerTargetInput,
   CreateReleaseContractInput,
   CreateRequirementInput,
   CreateTaskDependencyInput,
@@ -69,6 +70,7 @@ export interface StateStore {
   createProject(input: CreateProjectInput): Project;
   getProject(id: EntityId): Project | undefined;
   listProjects(): readonly Project[];
+  updateProjectWorkerTarget(input: UpdateProjectWorkerTargetInput): Project;
 
   // Requirements & DoD
   createRequirement(input: CreateRequirementInput): Requirement;

@@ -18,6 +18,7 @@ describe("InMemoryStateStore", () => {
 
     expect(project.id).toBe(projectId);
     expect(project.status).toBe("active");
+    expect(project.doNotModifyConstraints).toEqual([]);
     expect(project.createdAt).toBeTruthy();
     expect(project.updatedAt).toBeTruthy();
   });

@@ -8,6 +8,7 @@ import type {
   SucceedInput,
   TerminalResult,
 } from "./types.js";
+import type { WorkerTaskPacket } from "../domain/worker-task-packet.js";
 
 export interface ControlPlaneClientOptions {
   readonly controlPlaneUrl: string;
@@ -37,6 +38,63 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
           "content-type": "application/json; charset=utf-8",
         },
         body: JSON.stringify(body),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "network error";
+      throw new ActuatorError("NETWORK_ERROR", redactSecrets(message, redact));
+    }
+
+    const text = await response.text();
+    let payload: Record<string, unknown> = {};
+    if (text.length > 0) {
+      try {
+        const parsed: unknown = JSON.parse(text);
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+          payload = parsed as Record<string, unknown>;
+        }
+      } catch {
+        throw new ActuatorError("PROTOCOL_ERROR", "Control plane returned non-JSON", {
+          status: response.status,
+        });
+      }
+    }
+
+    if (!response.ok) {
+      const apiError = payload["error"];
+      const code =
+        typeof apiError === "object" &&
+        apiError !== null &&
+        typeof (apiError as { code?: unknown }).code === "string"
+          ? (apiError as { code: string }).code
+          : "HTTP_ERROR";
+      const message =
+        typeof apiError === "object" &&
+        apiError !== null &&
+        typeof (apiError as { message?: unknown }).message === "string"
+          ? (apiError as { message: string }).message
+          : `Control plane request failed (${response.status})`;
+      throw new ActuatorError(code, redactSecrets(message, redact), {
+        status: response.status,
+        ...(isOwnershipLostStatus(response.status) ? { ownershipLost: true } : {}),
+      });
+    }
+
+    return { status: response.status, payload };
+  }
+
+  async function requestJsonGet(
+    path: string,
+    extraSecrets: readonly string[] = [],
+  ): Promise<{ status: number; payload: Record<string, unknown> }> {
+    const redact = [...secrets, ...extraSecrets];
+    let response: Response;
+    try {
+      response = await fetchImpl(`${base}${path}`, {
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${options.serviceToken}`,
+          accept: "application/json",
+        },
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "network error";
@@ -143,6 +201,18 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
         [leaseToken],
       );
       return terminalFromPayload(payload);
+    },
+
+    async getTaskPacket(workerRunId: string, leaseToken: string): Promise<WorkerTaskPacket> {
+      const { payload } = await requestJsonGet(
+        `/api/worker-runs/${encodeURIComponent(workerRunId)}/task-packet?leaseToken=${encodeURIComponent(leaseToken)}`,
+        [leaseToken],
+      );
+      const packet = payload["packet"];
+      if (typeof packet !== "object" || packet === null || Array.isArray(packet)) {
+        throw new ActuatorError("PROTOCOL_ERROR", "Task packet response missing packet");
+      }
+      return packet as WorkerTaskPacket;
     },
   };
 }

@@ -125,6 +125,30 @@ function createRecordingClient(options?: {
         applied: true,
       };
     },
+    async getTaskPacket(workerRunId, leaseToken) {
+      calls.push({ op: "getTaskPacket", workerRunId, leaseToken });
+      return {
+        workerRunId,
+        taskId: "task-1",
+        projectId: "proj-1",
+        task: {
+          id: "task-1",
+          title: "T",
+          description: "D",
+          kind: "implementation",
+          status: "in_progress",
+        },
+        requirements: [],
+        acceptanceCriteria: [],
+        blockers: [],
+        doNotModifyConstraints: [],
+        execution: {
+          workerKind: "generic",
+          iteration: 1,
+          status: "running",
+        },
+      };
+    },
   };
   void heartbeatCount;
   return { client, calls };
@@ -392,5 +416,45 @@ describe("createControlPlaneClient", () => {
       ownershipLost: true,
       message: expect.not.stringContaining(LEASE_TOKEN),
     });
+  });
+
+  it("fetches a task packet with the lease token in the query string", async () => {
+    const fetches: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      fetches.push(String(input));
+      return new Response(
+        JSON.stringify({
+          packet: {
+            workerRunId: WORKER_RUN_ID,
+            taskId: "task-1",
+            projectId: "proj-1",
+            task: {
+              id: "task-1",
+              title: "T",
+              description: "D",
+              kind: "implementation",
+              status: "in_progress",
+            },
+            requirements: [],
+            acceptanceCriteria: [],
+            blockers: [],
+            doNotModifyConstraints: [],
+            execution: { workerKind: "generic", iteration: 1, status: "running" },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const client = createControlPlaneClient({
+      controlPlaneUrl: "https://example.test",
+      serviceToken: SERVICE_TOKEN,
+      fetchImpl,
+    });
+    const packet = await client.getTaskPacket(WORKER_RUN_ID, LEASE_TOKEN);
+    expect(packet.taskId).toBe("task-1");
+    expect(fetches[0]).toBe(
+      `https://example.test/api/worker-runs/${WORKER_RUN_ID}/task-packet?leaseToken=${encodeURIComponent(LEASE_TOKEN)}`,
+    );
+    expect(fetches[0]).not.toContain(SERVICE_TOKEN);
   });
 });
