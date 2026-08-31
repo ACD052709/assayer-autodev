@@ -23,6 +23,7 @@ import type {
   CreateTestResultInput,
   CreateVerifierRunInput,
   AssignTaskToWorkerRunInput,
+  ApplyWorkerRunTaskTransitionInput,
   CreateWorkerEventInput,
   CreateWorkerReportInput,
   CreateWorkerRunInput,
@@ -53,6 +54,7 @@ import type {
   WorkerEvent,
   WorkerReport,
   WorkerRun,
+  WorkerRunTaskTransitionResult,
 } from "../domain/index.js";
 
 /** Durable state access contract; in-memory implementation precedes Cloudflare D1. */
@@ -90,6 +92,14 @@ export interface StateStore {
    * If the task is already assigned, returns the existing assignment with `created: false`.
    */
   assignTaskToWorkerRun(input: AssignTaskToWorkerRunInput): TaskWorkerAssignment | undefined;
+  /**
+   * Conditionally move a worker_run and its assigned task together.
+   * No-op (applied: false) when both are already at the target statuses.
+   * Fails closed on missing entities, assignment mismatch, or illegal transitions.
+   */
+  applyWorkerRunTaskTransition(
+    input: ApplyWorkerRunTaskTransitionInput,
+  ): WorkerRunTaskTransitionResult;
   updateWorkerRunStatus(
     workerRunId: EntityId,
     status: WorkerRun["status"],

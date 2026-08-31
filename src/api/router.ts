@@ -12,6 +12,12 @@ import {
   WorkerReportValidationError,
 } from "../dispatch/index.js";
 import {
+  createWorkerRunLifecycle,
+  WorkerRunLifecycle,
+  WorkerRunLifecycleError,
+  type StructuredOutcome,
+} from "../executor/index.js";
+import {
   BudgetResourceConflictError,
   expectedBudgetUnit,
   listBudgetResourceViews,
@@ -51,6 +57,7 @@ export interface ApiDependencies {
   blobs: EvidenceBlobStore;
   masterOrchestrator?: MasterOrchestrator;
   taskDispatcher?: WorkerDispatcher;
+  workerRunLifecycle?: WorkerRunLifecycle;
 }
 
 export interface ApiRouterOptions {
@@ -172,6 +179,48 @@ function matchRoute(pathname: string, pattern: string): Record<string, string> |
 
 function dispatcherFor(deps: ApiDependencies): WorkerDispatcher {
   return deps.taskDispatcher ?? createWorkerDispatcher({ store: deps.store });
+}
+
+function lifecycleFor(deps: ApiDependencies): WorkerRunLifecycle {
+  return (
+    deps.workerRunLifecycle ??
+    createWorkerRunLifecycle({ store: deps.store, dispatcher: dispatcherFor(deps) })
+  );
+}
+
+function mapLifecycleError(error: WorkerRunLifecycleError): ApiError {
+  if (error.code === "not_found") {
+    return new ApiError(404, "not_found", error.message);
+  }
+  if (error.code === "validation") {
+    return new ApiError(400, "validation_error", error.message);
+  }
+  if (error.code === "inconsistent") {
+    return new ApiError(409, "conflict", error.message);
+  }
+  return new ApiError(409, "conflict", error.message);
+}
+
+function assertStructuredOutcome(value: unknown, field: string): StructuredOutcome | undefined {
+  const obj = assertOptionalObject(value, field);
+  if (obj === undefined) {
+    return undefined;
+  }
+  const result: Record<string, string | number | boolean> = {};
+  for (const [key, entry] of Object.entries(obj)) {
+    if (typeof entry === "string" || typeof entry === "boolean") {
+      result[key] = entry;
+      continue;
+    }
+    if (typeof entry === "number" && Number.isFinite(entry)) {
+      result[key] = entry;
+      continue;
+    }
+    throw new ApiError(400, "validation_error", `Invalid ${field}.${key}`, [
+      { field: `${field}.${key}`, message: "Must be a string, finite number, or boolean" },
+    ]);
+  }
+  return result;
 }
 
 function assertOptionalInteger(value: unknown, field: string): number | undefined {
@@ -827,6 +876,115 @@ async function handleGetWorkerRun(
   return jsonResponse({ workerRun });
 }
 
+async function handlePostWorkerRunClaim(
+  params: Record<string, string>,
+  request: Request,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const workerRunId = assertEntityId(params.workerRunId, "workerRunId");
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, []);
+  try {
+    const result = await lifecycleFor(deps).claim(workerRunId);
+    return jsonResponse({
+      workerRun: result.workerRun,
+      task: result.task,
+      event: result.event,
+      claimed: result.claimed,
+    });
+  } catch (error) {
+    if (error instanceof WorkerRunLifecycleError) {
+      throw mapLifecycleError(error);
+    }
+    throw error;
+  }
+}
+
+async function handlePostWorkerRunSucceed(
+  params: Record<string, string>,
+  request: Request,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const workerRunId = assertEntityId(params.workerRunId, "workerRunId");
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, ["summary", "structuredOutcome"]);
+  const structuredOutcome = assertStructuredOutcome(body.structuredOutcome, "structuredOutcome");
+  try {
+    const result = await lifecycleFor(deps).succeed(workerRunId, {
+      summary: assertNonEmptyString(body.summary, "summary"),
+      ...(structuredOutcome !== undefined ? { structuredOutcome } : {}),
+    });
+    return jsonResponse({
+      workerRun: result.workerRun,
+      task: result.task,
+      event: result.event,
+      report: result.report,
+      inboxItem: result.inboxItem,
+      applied: result.applied,
+    });
+  } catch (error) {
+    if (error instanceof WorkerRunLifecycleError) {
+      throw mapLifecycleError(error);
+    }
+    throw error;
+  }
+}
+
+async function handlePostWorkerRunFail(
+  params: Record<string, string>,
+  request: Request,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const workerRunId = assertEntityId(params.workerRunId, "workerRunId");
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, ["errorCode", "summary"]);
+  try {
+    const result = await lifecycleFor(deps).fail(workerRunId, {
+      errorCode: assertNonEmptyString(body.errorCode, "errorCode"),
+      summary: assertNonEmptyString(body.summary, "summary"),
+    });
+    return jsonResponse({
+      workerRun: result.workerRun,
+      task: result.task,
+      event: result.event,
+      report: result.report,
+      inboxItem: result.inboxItem,
+      applied: result.applied,
+    });
+  } catch (error) {
+    if (error instanceof WorkerRunLifecycleError) {
+      throw mapLifecycleError(error);
+    }
+    throw error;
+  }
+}
+
+async function handlePostWorkerRunCancel(
+  params: Record<string, string>,
+  request: Request,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const workerRunId = assertEntityId(params.workerRunId, "workerRunId");
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, ["reason"]);
+  try {
+    const result = await lifecycleFor(deps).cancel(workerRunId, {
+      reason: assertNonEmptyString(body.reason, "reason"),
+    });
+    return jsonResponse({
+      workerRun: result.workerRun,
+      task: result.task,
+      event: result.event,
+      applied: result.applied,
+    });
+  } catch (error) {
+    if (error instanceof WorkerRunLifecycleError) {
+      throw mapLifecycleError(error);
+    }
+    throw error;
+  }
+}
+
 const routes: readonly {
   method: string;
   pattern: string;
@@ -989,6 +1147,30 @@ const routes: readonly {
     pattern: "/api/worker-runs/:workerRunId",
     policy: READ_POLICY,
     handler: (_request, params, deps) => handleGetWorkerRun(params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/worker-runs/:workerRunId/claim",
+    policy: WORKER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostWorkerRunClaim(params, request, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/worker-runs/:workerRunId/succeed",
+    policy: WORKER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostWorkerRunSucceed(params, request, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/worker-runs/:workerRunId/fail",
+    policy: WORKER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostWorkerRunFail(params, request, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/worker-runs/:workerRunId/cancel",
+    policy: WORKER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostWorkerRunCancel(params, request, deps),
   },
 ];
 

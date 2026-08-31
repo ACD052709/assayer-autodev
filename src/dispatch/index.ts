@@ -7,6 +7,7 @@ export {
   type DispatchRequest,
   type DispatchResult,
   type PersistWorkerReportResult,
+  type PersistWorkerReportExtras,
 } from "./dispatcher.js";
 export {
   DISPATCH_ELIGIBLE_STATUSES,

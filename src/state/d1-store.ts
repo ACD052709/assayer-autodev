@@ -27,6 +27,7 @@ import type {
   CreateTestResultInput,
   CreateVerifierRunInput,
   AssignTaskToWorkerRunInput,
+  ApplyWorkerRunTaskTransitionInput,
   CreateWorkerEventInput,
   CreateWorkerReportInput,
   CreateWorkerRunInput,
@@ -61,8 +62,10 @@ import type {
   WorkerEvent,
   WorkerReport,
   WorkerRun,
+  WorkerRunTaskTransitionResult,
 } from "../domain/index.js";
 import { createTimestamps, nowIso, touchTimestamps, withStatus } from "../domain/common.js";
+import { isTerminalWorkerRunStatus } from "../domain/worker.js";
 import {
   BudgetResourceConflictError,
   limitsForBudgetResource,
@@ -81,6 +84,15 @@ function sumUsage(entries: readonly BudgetEntry[], category: BudgetCategory): nu
   return entries
     .filter((e) => e.category === category)
     .reduce((sum, e) => sum + e.amount, 0);
+}
+
+function sqlQuotedStatuses(values: readonly string[]): string {
+  for (const value of values) {
+    if (!/^[a-z_]+$/.test(value)) {
+      throw new Error(`Invalid status token: ${value}`);
+    }
+  }
+  return values.map((value) => `'${value}'`).join(", ");
 }
 
 interface ProjectRow {
@@ -1131,6 +1143,110 @@ export class D1StateStore implements AsyncStateStore {
       }
     }
     return undefined;
+  }
+
+  async applyWorkerRunTaskTransition(
+    input: ApplyWorkerRunTaskTransitionInput,
+  ): Promise<WorkerRunTaskTransitionResult> {
+    const run = await this.getWorkerRun(input.workerRunId);
+    if (run === undefined) {
+      return { ok: false, reason: "not_found" };
+    }
+    if (run.taskId === undefined) {
+      return { ok: false, reason: "inconsistent" };
+    }
+    const task = await this.getTask(run.taskId);
+    if (task === undefined) {
+      return { ok: false, reason: "not_found" };
+    }
+    if (task.projectId !== run.projectId || task.assignedWorkerRunId !== run.id) {
+      return { ok: false, reason: "inconsistent" };
+    }
+    if (run.status === input.toRunStatus) {
+      if (task.status !== input.toTaskStatus) {
+        return { ok: false, reason: "inconsistent" };
+      }
+      return { ok: true, applied: false, task, workerRun: run };
+    }
+    if (
+      !input.fromRunStatuses.includes(run.status) ||
+      !input.fromTaskStatuses.includes(task.status)
+    ) {
+      return { ok: false, reason: "illegal_transition" };
+    }
+
+    const at = nowIso();
+    const startedAt =
+      input.toRunStatus === "running" ? (run.startedAt ?? at) : (run.startedAt ?? null);
+    const completedAt = isTerminalWorkerRunStatus(input.toRunStatus)
+      ? (run.completedAt ?? at)
+      : (run.completedAt ?? null);
+    const errorMessage = input.errorMessage ?? run.errorMessage ?? null;
+    const fromRunSql = sqlQuotedStatuses(input.fromRunStatuses);
+    const fromTaskSql = sqlQuotedStatuses(input.fromTaskStatuses);
+
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE worker_runs
+           SET status = ?, status_changed_at = ?, started_at = ?, completed_at = ?, error_message = ?, updated_at = ?
+           WHERE id = ?
+             AND status IN (${fromRunSql})
+             AND EXISTS (
+               SELECT 1 FROM tasks
+               WHERE tasks.id = worker_runs.task_id
+                 AND tasks.project_id = worker_runs.project_id
+                 AND tasks.assigned_worker_run_id = worker_runs.id
+                 AND tasks.status IN (${fromTaskSql})
+             )`,
+        )
+        .bind(
+          input.toRunStatus,
+          at,
+          startedAt,
+          completedAt,
+          errorMessage,
+          at,
+          input.workerRunId,
+        ),
+      this.db
+        .prepare(
+          `UPDATE tasks
+           SET status = ?, status_changed_at = ?, updated_at = ?
+           WHERE id = ?
+             AND project_id = ?
+             AND assigned_worker_run_id = ?
+             AND status IN (${fromTaskSql})`,
+        )
+        .bind(input.toTaskStatus, at, at, task.id, run.projectId, run.id),
+    ]);
+
+    const runChanges = results[0]?.meta.changes ?? 0;
+    const taskChanges = results[1]?.meta.changes ?? 0;
+    if (runChanges > 0 && taskChanges > 0) {
+      const updatedRun = await this.getWorkerRun(input.workerRunId);
+      const updatedTask = await this.getTask(task.id);
+      if (updatedRun === undefined || updatedTask === undefined) {
+        return { ok: false, reason: "not_found" };
+      }
+      return { ok: true, applied: true, task: updatedTask, workerRun: updatedRun };
+    }
+
+    const currentRun = await this.getWorkerRun(input.workerRunId);
+    const currentTask = await this.getTask(task.id);
+    if (currentRun === undefined || currentTask === undefined) {
+      return { ok: false, reason: "not_found" };
+    }
+    if (currentRun.status === input.toRunStatus && currentTask.status === input.toTaskStatus) {
+      if (currentTask.assignedWorkerRunId !== currentRun.id) {
+        return { ok: false, reason: "inconsistent" };
+      }
+      return { ok: true, applied: false, task: currentTask, workerRun: currentRun };
+    }
+    if (currentTask.assignedWorkerRunId !== currentRun.id || currentTask.projectId !== currentRun.projectId) {
+      return { ok: false, reason: "inconsistent" };
+    }
+    return { ok: false, reason: "illegal_transition" };
   }
 
   async updateWorkerRunStatus(

@@ -116,6 +116,76 @@ describe("D1StateStore", () => {
     expect(await store.getWorkerReportByWorkerRunId("wrun-assign-1")).toBeUndefined();
   });
 
+  it("claims a queued worker run onto its assigned task", async () => {
+    await store.createProject({ id: projectId, name: "P", description: "P" });
+    await store.createTask({
+      id: "task-claim",
+      projectId,
+      title: "Claim",
+      description: "",
+      kind: "implementation",
+    });
+    const assigned = await store.assignTaskToWorkerRun({
+      id: "wrun-claim-1",
+      projectId,
+      taskId: "task-claim",
+      workerKind: "generic",
+    });
+    expect(assigned?.created).toBe(true);
+
+    const first = await store.applyWorkerRunTaskTransition({
+      workerRunId: "wrun-claim-1",
+      fromRunStatuses: ["queued"],
+      toRunStatus: "running",
+      fromTaskStatuses: ["assigned"],
+      toTaskStatus: "in_progress",
+    });
+    expect(first.ok).toBe(true);
+    if (first.ok) {
+      expect(first.applied).toBe(true);
+      expect(first.workerRun.status).toBe("running");
+      expect(first.workerRun.startedAt).toBeTruthy();
+      expect(first.task.status).toBe("in_progress");
+    }
+
+    const second = await store.applyWorkerRunTaskTransition({
+      workerRunId: "wrun-claim-1",
+      fromRunStatuses: ["queued"],
+      toRunStatus: "running",
+      fromTaskStatuses: ["assigned"],
+      toTaskStatus: "in_progress",
+    });
+    expect(second.ok).toBe(true);
+    if (second.ok) {
+      expect(second.applied).toBe(false);
+      expect(second.workerRun.startedAt).toBe(first.ok ? first.workerRun.startedAt : undefined);
+    }
+
+    const success = await store.applyWorkerRunTaskTransition({
+      workerRunId: "wrun-claim-1",
+      fromRunStatuses: ["running"],
+      toRunStatus: "succeeded",
+      fromTaskStatuses: ["in_progress"],
+      toTaskStatus: "awaiting_verification",
+    });
+    expect(success.ok).toBe(true);
+    if (success.ok) {
+      expect(success.task.status).toBe("awaiting_verification");
+      expect(success.workerRun.status).toBe("succeeded");
+    }
+    const afterSuccess = await store.applyWorkerRunTaskTransition({
+      workerRunId: "wrun-claim-1",
+      fromRunStatuses: ["running"],
+      toRunStatus: "failed",
+      fromTaskStatuses: ["in_progress"],
+      toTaskStatus: "failed",
+    });
+    expect(afterSuccess.ok).toBe(false);
+    if (!afterSuccess.ok) {
+      expect(afterSuccess.reason).toBe("illegal_transition");
+    }
+  });
+
   it("records verification outcomes", async () => {
     await store.createProject({ id: projectId, name: "P", description: "P" });
     await store.createTask({

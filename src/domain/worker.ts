@@ -1,5 +1,5 @@
 import type { EntityId, ISOTimestamp, Provenance, StatusRecord, Timestamps } from "./common.js";
-import type { Task } from "./task.js";
+import type { Task, TaskStatus } from "./task.js";
 
 export type WorkerKind = "cursor_acp" | "playwright" | "verifier" | "generic";
 
@@ -10,6 +10,17 @@ export type WorkerRunStatus =
   | "failed"
   | "cancelled"
   | "timed_out";
+
+export const TERMINAL_WORKER_RUN_STATUSES: ReadonlySet<WorkerRunStatus> = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+]);
+
+export function isTerminalWorkerRunStatus(status: WorkerRunStatus): boolean {
+  return TERMINAL_WORKER_RUN_STATUSES.has(status);
+}
 
 export interface WorkerRun extends Timestamps, StatusRecord<WorkerRunStatus>, Provenance {
   readonly id: EntityId;
@@ -86,3 +97,24 @@ export interface TaskWorkerAssignment {
   readonly workerRun: WorkerRun;
   readonly created: boolean;
 }
+
+export interface ApplyWorkerRunTaskTransitionInput {
+  readonly workerRunId: EntityId;
+  readonly fromRunStatuses: readonly WorkerRunStatus[];
+  readonly toRunStatus: WorkerRunStatus;
+  readonly fromTaskStatuses: readonly TaskStatus[];
+  readonly toTaskStatus: TaskStatus;
+  readonly errorMessage?: string;
+}
+
+export type WorkerRunTaskTransitionResult =
+  | {
+      readonly ok: true;
+      readonly applied: boolean;
+      readonly task: Task;
+      readonly workerRun: WorkerRun;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: "not_found" | "inconsistent" | "illegal_transition";
+    };

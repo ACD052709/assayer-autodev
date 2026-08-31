@@ -40,6 +40,11 @@ export interface PersistWorkerReportResult {
   readonly created: boolean;
 }
 
+export interface PersistWorkerReportExtras {
+  readonly structuredOutcome?: Readonly<Record<string, string | number | boolean>>;
+  readonly errorCode?: string;
+}
+
 export function normalizeMaxAssignments(value: number | undefined): number {
   const n = value ?? DEFAULT_MAX_ASSIGNMENTS;
   if (!Number.isInteger(n) || n < 1 || n > MAX_ASSIGNMENTS_LIMIT) {
@@ -51,7 +56,11 @@ export function normalizeMaxAssignments(value: number | undefined): number {
   return n;
 }
 
-function workerReportInboxBody(report: WorkerReport, workerRunStatus: string): string {
+function workerReportInboxBody(
+  report: WorkerReport,
+  workerRunStatus: string,
+  extras?: PersistWorkerReportExtras,
+): string {
   return JSON.stringify({
     projectId: report.projectId,
     taskId: report.taskId,
@@ -59,6 +68,8 @@ function workerReportInboxBody(report: WorkerReport, workerRunStatus: string): s
     reportId: report.id,
     outcome: report.outcome,
     workerRunStatus,
+    ...(extras?.structuredOutcome !== undefined ? { structuredOutcome: extras.structuredOutcome } : {}),
+    ...(extras?.errorCode !== undefined ? { errorCode: extras.errorCode } : {}),
   });
 }
 
@@ -127,7 +138,10 @@ export class WorkerDispatcher {
    * Persist a worker report and enqueue a Master inbox notification.
    * Does not mutate task status or blockers. Duplicate id or workerRunId is idempotent.
    */
-  async persistWorkerReport(input: CreateWorkerReportInput): Promise<PersistWorkerReportResult> {
+  async persistWorkerReport(
+    input: CreateWorkerReportInput,
+    extras?: PersistWorkerReportExtras,
+  ): Promise<PersistWorkerReportResult> {
     const workerRun = await this.store.getWorkerRun(input.workerRunId);
     if (workerRun === undefined) {
       throw new WorkerReportValidationError("not_found", `Worker run not found: ${input.workerRunId}`);
@@ -150,23 +164,24 @@ export class WorkerDispatcher {
       if (existingById.workerRunId !== input.workerRunId || existingById.projectId !== input.projectId) {
         throw new WorkerReportValidationError("conflict", `Worker report already exists: ${input.id}`);
       }
-      const inboxItem = await this.ensureWorkerReportInbox(existingById, workerRun.status);
+      const inboxItem = await this.ensureWorkerReportInbox(existingById, workerRun.status, extras);
       return { report: existingById, inboxItem, created: false };
     }
 
     if (existingByRun !== undefined) {
-      const inboxItem = await this.ensureWorkerReportInbox(existingByRun, workerRun.status);
+      const inboxItem = await this.ensureWorkerReportInbox(existingByRun, workerRun.status, extras);
       return { report: existingByRun, inboxItem, created: false };
     }
 
     const report = await this.store.createWorkerReport(input);
-    const inboxItem = await this.ensureWorkerReportInbox(report, workerRun.status);
+    const inboxItem = await this.ensureWorkerReportInbox(report, workerRun.status, extras);
     return { report, inboxItem, created: true };
   }
 
   private async ensureWorkerReportInbox(
     report: WorkerReport,
     workerRunStatus: string,
+    extras?: PersistWorkerReportExtras,
   ): Promise<MasterInboxItem> {
     const inbox = await this.store.listMasterInbox(report.projectId);
     const existing = findWorkerReportInbox(inbox, report.id);
@@ -178,7 +193,7 @@ export class WorkerDispatcher {
       projectId: report.projectId,
       kind: "worker_report",
       subject: `Worker report: ${report.outcome}`,
-      body: workerReportInboxBody(report, workerRunStatus),
+      body: workerReportInboxBody(report, workerRunStatus, extras),
       relatedEntityId: report.id,
     });
   }

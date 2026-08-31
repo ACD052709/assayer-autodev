@@ -25,6 +25,7 @@ import type {
   CreateTestResultInput,
   CreateVerifierRunInput,
   AssignTaskToWorkerRunInput,
+  ApplyWorkerRunTaskTransitionInput,
   CreateWorkerEventInput,
   CreateWorkerReportInput,
   CreateWorkerRunInput,
@@ -55,8 +56,10 @@ import type {
   WorkerEvent,
   WorkerReport,
   WorkerRun,
+  WorkerRunTaskTransitionResult,
 } from "../domain/index.js";
 import { createTimestamps, nowIso, touchTimestamps, withStatus } from "../domain/common.js";
+import { isTerminalWorkerRunStatus } from "../domain/worker.js";
 import {
   BudgetResourceConflictError,
   limitsForBudgetResource,
@@ -278,6 +281,55 @@ export class InMemoryStateStore implements StateStore {
     };
     this.tasks.set(task.id, updated);
     return { task: updated, workerRun, created: true };
+  }
+
+  applyWorkerRunTaskTransition(
+    input: ApplyWorkerRunTaskTransitionInput,
+  ): WorkerRunTaskTransitionResult {
+    const run = this.workerRuns.get(input.workerRunId);
+    if (run === undefined) {
+      return { ok: false, reason: "not_found" };
+    }
+    if (run.taskId === undefined) {
+      return { ok: false, reason: "inconsistent" };
+    }
+    const task = this.tasks.get(run.taskId);
+    if (task === undefined) {
+      return { ok: false, reason: "not_found" };
+    }
+    if (task.projectId !== run.projectId || task.assignedWorkerRunId !== run.id) {
+      return { ok: false, reason: "inconsistent" };
+    }
+    if (run.status === input.toRunStatus) {
+      if (task.status !== input.toTaskStatus) {
+        return { ok: false, reason: "inconsistent" };
+      }
+      return { ok: true, applied: false, task, workerRun: run };
+    }
+    if (
+      !input.fromRunStatuses.includes(run.status) ||
+      !input.fromTaskStatuses.includes(task.status)
+    ) {
+      return { ok: false, reason: "illegal_transition" };
+    }
+
+    const at = nowIso();
+    const updatedRun: WorkerRun = {
+      ...run,
+      ...withStatus(input.toRunStatus, at),
+      ...touchTimestamps(run, at),
+      ...(input.toRunStatus === "running" ? { startedAt: run.startedAt ?? at } : {}),
+      ...(isTerminalWorkerRunStatus(input.toRunStatus) ? { completedAt: run.completedAt ?? at } : {}),
+      ...(input.errorMessage !== undefined ? { errorMessage: input.errorMessage } : {}),
+    };
+    const updatedTask: Task = {
+      ...task,
+      ...withStatus(input.toTaskStatus, at),
+      ...touchTimestamps(task, at),
+    };
+    this.workerRuns.set(run.id, updatedRun);
+    this.tasks.set(task.id, updatedTask);
+    return { ok: true, applied: true, task: updatedTask, workerRun: updatedRun };
   }
 
   updateWorkerRunStatus(
