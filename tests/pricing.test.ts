@@ -6,6 +6,7 @@ import {
   DEFAULT_MODEL_PRICING_CATALOG,
   estimateModelCost,
   GPT_5_6_SOL_PRICES,
+  interpretStoredCost,
 } from "../src/master/pricing.js";
 
 describe("model pricing catalog", () => {
@@ -59,5 +60,51 @@ describe("model pricing catalog", () => {
     );
     expect(estimate).toEqual({ status: "available", currency: "usd", amount: 3 });
     expect(DEFAULT_MODEL_PRICING_CATALOG.models[MASTER_MODEL_ID]).toEqual(GPT_5_6_SOL_PRICES);
+  });
+
+  it("does not treat a historical placeholder-zero as genuine available $0", () => {
+    const interpreted = interpretStoredCost({
+      model: MASTER_MODEL_ID,
+      estimatedCost: 0,
+      inputTokens: 1036,
+      outputTokens: 178,
+    });
+    expect(interpreted.costStatus).toBe("unavailable");
+    expect(interpreted.estimatedCost).toBe(0);
+  });
+
+  it("treats a stored zero as available only when catalog pricing also yields zero", () => {
+    const catalog = createModelPricingCatalog({
+      free: {
+        inputPerMillion: 0,
+        cachedInputPerMillion: 0,
+        outputPerMillion: 0,
+        currency: "usd",
+      },
+    });
+    expect(
+      interpretStoredCost(
+        { model: "free", estimatedCost: 0, inputTokens: 100, outputTokens: 20 },
+        catalog,
+      ),
+    ).toEqual({ costStatus: "available", estimatedCost: 0 });
+  });
+
+  it("keeps nonzero stored costs available and unknown models unavailable", () => {
+    expect(
+      interpretStoredCost({
+        model: MASTER_MODEL_ID,
+        estimatedCost: 0.007704,
+        inputTokens: 1036,
+        outputTokens: 178,
+      }),
+    ).toEqual({ costStatus: "available", estimatedCost: 0.007704 });
+    expect(
+      interpretStoredCost({
+        model: "mystery-model",
+        inputTokens: 1036,
+        outputTokens: 178,
+      }),
+    ).toEqual({ costStatus: "unavailable" });
   });
 });

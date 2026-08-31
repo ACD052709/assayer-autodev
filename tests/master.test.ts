@@ -462,6 +462,29 @@ describe("MasterOrchestrator", () => {
     expect(run.estimatedCost).toBeCloseTo(0.00456, 10);
     expect(sync.getBudgetLedger(PROJECT_ID)!.entries[0]?.amount).toBe(1100);
   });
+
+  it("does not treat a persisted placeholder-zero Sol cost as available", async () => {
+    const sync = createInMemoryStateStore();
+    await seedProject(sync);
+    const run = sync.createMasterRun({
+      id: "mrun-64b0fe68-ca55-40c9-ab3f-b943eb294e49",
+      projectId: PROJECT_ID,
+      proposedAction: "CREATE_TASKS",
+      enforcedAction: "CREATE_TASKS",
+      rationale: "Historical smoke run",
+      createdTaskIds: ["task-e5bfcaaa-b2bb-4c6f-b8f9-052eff45e0ba"],
+      promptVersion: "master-system-v1",
+      model: "gpt-5.6-sol",
+      inputTokens: 1036,
+      outputTokens: 178,
+      estimatedCost: 0,
+      status: "completed",
+    });
+    expect(run.costStatus).toBe("unavailable");
+    expect(run.estimatedCost).toBe(0);
+    expect(sync.getMasterRun(run.id)?.costStatus).toBe("unavailable");
+    expect(sync.getBudgetLedger(PROJECT_ID)?.entries).toEqual([]);
+  });
 });
 
 describe("evaluateFinishedGate", () => {

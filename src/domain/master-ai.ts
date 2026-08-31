@@ -133,7 +133,7 @@ export interface MasterRun extends Timestamps, StatusRecord<MasterRunStatus> {
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly estimatedCost?: number;
-  /** Present when usage exists. "unavailable" means pricing could not be resolved — never a fake $0. */
+  /** Present when usage exists. "unavailable" includes unknown models and historical placeholder $0. */
   readonly costStatus?: "available" | "unavailable";
 }
 

@@ -59,6 +59,7 @@ import {
   BudgetResourceConflictError,
   limitsForBudgetResource,
 } from "../domain/budget.js";
+import { interpretStoredCost } from "../master/pricing.js";
 import type { StateStore } from "./store.js";
 
 function sumUsage(entries: readonly BudgetEntry[], category: BudgetCategory): number {
@@ -814,8 +815,12 @@ export class InMemoryStateStore implements StateStore {
       ...(input.context !== undefined ? { context: input.context } : {}),
       ...(input.inputTokens !== undefined ? { inputTokens: input.inputTokens } : {}),
       ...(input.outputTokens !== undefined ? { outputTokens: input.outputTokens } : {}),
-      ...(input.estimatedCost !== undefined ? { estimatedCost: input.estimatedCost } : {}),
-      ...(input.costStatus !== undefined ? { costStatus: input.costStatus } : {}),
+      ...interpretStoredCost({
+        model: input.model,
+        ...(input.estimatedCost !== undefined ? { estimatedCost: input.estimatedCost } : {}),
+        ...(input.inputTokens !== undefined ? { inputTokens: input.inputTokens } : {}),
+        ...(input.outputTokens !== undefined ? { outputTokens: input.outputTokens } : {}),
+      }),
       ...createTimestamps(),
       ...withStatus(input.status),
     };

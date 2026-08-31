@@ -194,6 +194,47 @@ describe("D1StateStore", () => {
     expect(master.status).toBe("planning");
   });
 
+  it("does not report historical placeholder-zero Master cost as available", async () => {
+    await store.createProject({ id: projectId, name: "P", description: "P" });
+    const written = await store.createMasterRun({
+      id: "mrun-placeholder-zero",
+      projectId,
+      proposedAction: "CREATE_TASKS",
+      enforcedAction: "CREATE_TASKS",
+      rationale: "Historical unpriced run",
+      promptVersion: "master-system-v1",
+      model: "gpt-5.6-sol",
+      inputTokens: 1036,
+      outputTokens: 178,
+      estimatedCost: 0,
+      status: "completed",
+    });
+    expect(written.costStatus).toBe("unavailable");
+    expect(written.estimatedCost).toBe(0);
+    const read = await store.getMasterRun("mrun-placeholder-zero");
+    expect(read?.costStatus).toBe("unavailable");
+    expect(read?.estimatedCost).toBe(0);
+    expect(read?.inputTokens).toBe(1036);
+    expect(read?.outputTokens).toBe(178);
+
+    const priced = await store.createMasterRun({
+      id: "mrun-priced",
+      projectId,
+      proposedAction: "CREATE_TASKS",
+      enforcedAction: "CREATE_TASKS",
+      rationale: "Priced run",
+      promptVersion: "master-system-v1",
+      model: "gpt-5.6-sol",
+      inputTokens: 1036,
+      outputTokens: 178,
+      estimatedCost: 0.007704,
+      status: "completed",
+    });
+    expect(priced.costStatus).toBe("available");
+    expect(priced.estimatedCost).toBe(0.007704);
+    expect((await store.getMasterRun("mrun-priced"))?.costStatus).toBe("available");
+  });
+
   it("adds budget resources without a new schema and rejects duplicates", async () => {
     await store.createProject({ id: projectId, name: "P", description: "P" });
     const first = await store.addBudgetResource({

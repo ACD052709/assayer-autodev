@@ -20,13 +20,16 @@ export {
   DEFAULT_MODEL_PRICING_CATALOG,
   estimateModelCost,
   GPT_5_6_SOL_PRICES,
+  interpretStoredCost,
   lookupModelPrices,
 } from "./pricing.js";
 export type {
+  InterpretedStoredCost,
   ModelCostEstimate,
   ModelPricingCatalog,
   ModelTokenPrices,
   ModelTokenUsage,
+  StoredCostFields,
 } from "./pricing.js";
 export { nextActiveTaskIds } from "./active-tasks.js";
 export { validateMasterDecision, MasterOutputValidationError } from "./validate-output.js";

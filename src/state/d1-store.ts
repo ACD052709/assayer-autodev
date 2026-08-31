@@ -73,6 +73,7 @@ import {
   parseJsonObject,
   toJson,
 } from "./d1/mappers.js";
+import { interpretStoredCost } from "../master/pricing.js";
 
 function sumUsage(entries: readonly BudgetEntry[], category: BudgetCategory): number {
   return entries
@@ -743,12 +744,12 @@ function rowToMasterRun(row: MasterRunRow): MasterRun {
   const inputTokens = optionalNumber(row.input_tokens);
   const outputTokens = optionalNumber(row.output_tokens);
   const estimatedCost = optionalNumber(row.estimated_cost);
-  const costStatus: MasterRun["costStatus"] =
-    estimatedCost !== undefined
-      ? "available"
-      : inputTokens !== undefined || outputTokens !== undefined
-        ? "unavailable"
-        : undefined;
+  const interpreted = interpretStoredCost({
+    model: row.model,
+    ...(estimatedCost !== undefined ? { estimatedCost } : {}),
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+  });
   return {
     id: row.id,
     projectId: row.project_id,
@@ -767,8 +768,8 @@ function rowToMasterRun(row: MasterRunRow): MasterRun {
     ...(context !== undefined ? { context } : {}),
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
-    ...(estimatedCost !== undefined ? { estimatedCost } : {}),
-    ...(costStatus !== undefined ? { costStatus } : {}),
+    ...(interpreted.estimatedCost !== undefined ? { estimatedCost: interpreted.estimatedCost } : {}),
+    ...(interpreted.costStatus !== undefined ? { costStatus: interpreted.costStatus } : {}),
   };
 }
 
@@ -2143,14 +2144,12 @@ export class D1StateStore implements AsyncStateStore {
       ...(input.context !== undefined ? { context: input.context } : {}),
       ...(input.inputTokens !== undefined ? { inputTokens: input.inputTokens } : {}),
       ...(input.outputTokens !== undefined ? { outputTokens: input.outputTokens } : {}),
-      ...(input.estimatedCost !== undefined ? { estimatedCost: input.estimatedCost } : {}),
-      ...(input.costStatus !== undefined
-        ? { costStatus: input.costStatus }
-        : input.estimatedCost !== undefined
-          ? { costStatus: "available" as const }
-          : input.inputTokens !== undefined || input.outputTokens !== undefined
-            ? { costStatus: "unavailable" as const }
-            : {}),
+      ...interpretStoredCost({
+        model: input.model,
+        ...(input.estimatedCost !== undefined ? { estimatedCost: input.estimatedCost } : {}),
+        ...(input.inputTokens !== undefined ? { inputTokens: input.inputTokens } : {}),
+        ...(input.outputTokens !== undefined ? { outputTokens: input.outputTokens } : {}),
+      }),
       ...createTimestamps(),
       ...withStatus(input.status),
     };
