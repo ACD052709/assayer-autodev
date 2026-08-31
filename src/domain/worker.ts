@@ -29,6 +29,10 @@ export interface WorkerRun extends Timestamps, StatusRecord<WorkerRunStatus>, Pr
   readonly startedAt?: ISOTimestamp;
   readonly completedAt?: ISOTimestamp;
   readonly errorMessage?: string;
+  /** Executor instance that currently or last owned this run. Not a secret. */
+  readonly ownerId?: EntityId;
+  readonly leaseExpiresAt?: ISOTimestamp;
+  readonly lastHeartbeatAt?: ISOTimestamp;
 }
 
 export type WorkerEventType =
@@ -105,6 +109,54 @@ export interface ApplyWorkerRunTaskTransitionInput {
   readonly fromTaskStatuses: readonly TaskStatus[];
   readonly toTaskStatus: TaskStatus;
   readonly errorMessage?: string;
+  readonly at?: ISOTimestamp;
+  readonly leaseTokenHash?: string;
+  readonly now?: ISOTimestamp;
+}
+
+export interface ClaimQueuedWorkerRunInput {
+  readonly workerRunId: EntityId;
+  readonly ownerId: EntityId;
+  readonly leaseTokenHash: string;
+  readonly leaseExpiresAt: ISOTimestamp;
+  readonly lastHeartbeatAt: ISOTimestamp;
+  readonly at: ISOTimestamp;
+}
+
+export type ClaimQueuedWorkerRunResult =
+  | { readonly ok: true; readonly task: Task; readonly workerRun: WorkerRun }
+  | {
+      readonly ok: false;
+      readonly reason: "not_found" | "inconsistent" | "illegal_transition" | "already_claimed";
+    };
+
+export interface HeartbeatWorkerRunInput {
+  readonly workerRunId: EntityId;
+  readonly leaseTokenHash: string;
+  readonly lastHeartbeatAt: ISOTimestamp;
+  readonly leaseExpiresAt: ISOTimestamp;
+  readonly now: ISOTimestamp;
+}
+
+export type HeartbeatWorkerRunResult =
+  | { readonly ok: true; readonly workerRun: WorkerRun }
+  | {
+      readonly ok: false;
+      readonly reason: "not_found" | "unauthorized" | "expired" | "illegal_transition";
+    };
+
+export type VerifyWorkerRunLeaseResult =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly reason: "not_found" | "unauthorized" | "expired" | "illegal_transition";
+    };
+
+export interface RequeueTimedOutWorkerRunInput {
+  readonly previousWorkerRunId: EntityId;
+  readonly newWorkerRunId: EntityId;
+  readonly projectId: EntityId;
+  readonly at?: ISOTimestamp;
 }
 
 export type WorkerRunTaskTransitionResult =
@@ -116,5 +168,5 @@ export type WorkerRunTaskTransitionResult =
     }
   | {
       readonly ok: false;
-      readonly reason: "not_found" | "inconsistent" | "illegal_transition";
+      readonly reason: "not_found" | "inconsistent" | "illegal_transition" | "unauthorized" | "expired";
     };

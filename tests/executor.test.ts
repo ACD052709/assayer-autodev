@@ -10,6 +10,7 @@ import { createSequentialIdFactory } from "../src/master/index.js";
 import { asAsyncStore, createInMemoryStateStore } from "../src/state/index.js";
 
 const PROJECT = "proj-exec";
+const OWNER = "owner-exec";
 
 describe("worker-run transition table", () => {
   it("allows only the documented edges", () => {
@@ -18,6 +19,8 @@ describe("worker-run transition table", () => {
     expect(isAllowedWorkerRunTransition("running", "succeeded")).toBe(true);
     expect(isAllowedWorkerRunTransition("running", "failed")).toBe(true);
     expect(isAllowedWorkerRunTransition("running", "cancelled")).toBe(true);
+    expect(isAllowedWorkerRunTransition("running", "timed_out")).toBe(true);
+    expect(isAllowedWorkerRunTransition("timed_out", "running")).toBe(false);
     expect(isAllowedWorkerRunTransition("succeeded", "failed")).toBe(false);
     expect(isAllowedWorkerRunTransition("failed", "succeeded")).toBe(false);
     expect(isAllowedWorkerRunTransition("cancelled", "running")).toBe(false);
@@ -55,9 +58,11 @@ describe("WorkerRunLifecycle", () => {
 
   it("dispatches pending to assigned then claims assigned to in_progress", async () => {
     const assignment = await dispatchOne();
-    const first = await lifecycle.claim(assignment.workerRun.id);
+    const first = await lifecycle.claim(assignment.workerRun.id, { ownerId: OWNER });
     expect(first.claimed).toBe(true);
+    expect(first.leaseToken.length).toBeGreaterThanOrEqual(32);
     expect(first.workerRun.status).toBe("running");
+    expect(first.workerRun.ownerId).toBe(OWNER);
     expect(first.workerRun.startedAt).toBeTruthy();
     expect(first.task.status).toBe("in_progress");
     expect(first.task.assignedWorkerRunId).toBe(assignment.workerRun.id);
@@ -67,19 +72,21 @@ describe("WorkerRunLifecycle", () => {
 
   it("does not start duplicate execution on a second claim", async () => {
     const assignment = await dispatchOne();
-    const first = await lifecycle.claim(assignment.workerRun.id);
-    const second = await lifecycle.claim(assignment.workerRun.id);
-    expect(second.claimed).toBe(false);
-    expect(second.workerRun.startedAt).toBe(first.workerRun.startedAt);
+    await lifecycle.claim(assignment.workerRun.id, { ownerId: OWNER });
+    await expect(lifecycle.claim(assignment.workerRun.id, { ownerId: "owner-other" })).rejects.toMatchObject({
+      code: "conflict",
+    });
+    expect(syncStore.getWorkerRun(assignment.workerRun.id)?.ownerId).toBe(OWNER);
     expect(syncStore.listWorkerEvents(assignment.workerRun.id)).toHaveLength(1);
     expect(syncStore.listWorkerRunsByProject(PROJECT)).toHaveLength(1);
   });
 
   it("moves in_progress to awaiting_verification on success and does not complete the task", async () => {
     const assignment = await dispatchOne();
-    await lifecycle.claim(assignment.workerRun.id);
+    const claimed = await lifecycle.claim(assignment.workerRun.id, { ownerId: OWNER });
     const done = await lifecycle.succeed(assignment.workerRun.id, {
       summary: "Slice finished",
+      leaseToken: claimed.leaseToken,
       structuredOutcome: { filesChanged: 2, passed: true },
     });
     expect(done.applied).toBe(true);
@@ -97,9 +104,15 @@ describe("WorkerRunLifecycle", () => {
 
   it("is idempotent for success: one terminal state, report, inbox item, and event", async () => {
     const assignment = await dispatchOne();
-    await lifecycle.claim(assignment.workerRun.id);
-    const first = await lifecycle.succeed(assignment.workerRun.id, { summary: "Done" });
-    const second = await lifecycle.succeed(assignment.workerRun.id, { summary: "Done again" });
+    const claimed = await lifecycle.claim(assignment.workerRun.id, { ownerId: OWNER });
+    const first = await lifecycle.succeed(assignment.workerRun.id, {
+      summary: "Done",
+      leaseToken: claimed.leaseToken,
+    });
+    const second = await lifecycle.succeed(assignment.workerRun.id, {
+      summary: "Done again",
+      leaseToken: claimed.leaseToken,
+    });
     expect(second.applied).toBe(false);
     expect(second.report.id).toBe(first.report.id);
     expect(second.report.summary).toBe("Done");
@@ -114,10 +127,11 @@ describe("WorkerRunLifecycle", () => {
 
   it("fails a running run to task failed and is idempotent", async () => {
     const assignment = await dispatchOne();
-    await lifecycle.claim(assignment.workerRun.id);
+    const claimed = await lifecycle.claim(assignment.workerRun.id, { ownerId: OWNER });
     const first = await lifecycle.fail(assignment.workerRun.id, {
       errorCode: "TOOL_ERROR",
       summary: "Compiler exploded",
+      leaseToken: claimed.leaseToken,
     });
     expect(first.workerRun.status).toBe("failed");
     expect(first.task.status).toBe("failed");
@@ -125,6 +139,7 @@ describe("WorkerRunLifecycle", () => {
     const second = await lifecycle.fail(assignment.workerRun.id, {
       errorCode: "TOOL_ERROR",
       summary: "Compiler exploded again",
+      leaseToken: claimed.leaseToken,
     });
     expect(second.applied).toBe(false);
     expect(second.report.id).toBe(first.report.id);
@@ -133,17 +148,28 @@ describe("WorkerRunLifecycle", () => {
 
   it("rejects success after failure and failure after success", async () => {
     const assignment = await dispatchOne("task-cross");
-    await lifecycle.claim(assignment.workerRun.id);
-    await lifecycle.fail(assignment.workerRun.id, { errorCode: "X", summary: "nope" });
+    const claimed = await lifecycle.claim(assignment.workerRun.id, { ownerId: OWNER });
+    await lifecycle.fail(assignment.workerRun.id, {
+      errorCode: "X",
+      summary: "nope",
+      leaseToken: claimed.leaseToken,
+    });
     await expect(
-      lifecycle.succeed(assignment.workerRun.id, { summary: "should not apply" }),
+      lifecycle.succeed(assignment.workerRun.id, {
+        summary: "should not apply",
+        leaseToken: claimed.leaseToken,
+      }),
     ).rejects.toBeInstanceOf(WorkerRunLifecycleError);
 
     const other = await dispatchOne("task-cross-2");
-    await lifecycle.claim(other.workerRun.id);
-    await lifecycle.succeed(other.workerRun.id, { summary: "ok" });
+    const otherClaim = await lifecycle.claim(other.workerRun.id, { ownerId: OWNER });
+    await lifecycle.succeed(other.workerRun.id, { summary: "ok", leaseToken: otherClaim.leaseToken });
     await expect(
-      lifecycle.fail(other.workerRun.id, { errorCode: "Y", summary: "too late" }),
+      lifecycle.fail(other.workerRun.id, {
+        errorCode: "Y",
+        summary: "too late",
+        leaseToken: otherClaim.leaseToken,
+      }),
     ).rejects.toBeInstanceOf(WorkerRunLifecycleError);
   });
 
@@ -160,8 +186,11 @@ describe("WorkerRunLifecycle", () => {
 
   it("cancels a running run and rejects cancellation after terminal", async () => {
     const assignment = await dispatchOne("task-cancel-r");
-    await lifecycle.claim(assignment.workerRun.id);
-    const result = await lifecycle.cancel(assignment.workerRun.id, { reason: "operator_stop" });
+    const claimed = await lifecycle.claim(assignment.workerRun.id, { ownerId: OWNER });
+    const result = await lifecycle.cancel(assignment.workerRun.id, {
+      reason: "operator_stop",
+      leaseToken: claimed.leaseToken,
+    });
     expect(result.workerRun.status).toBe("cancelled");
     expect(result.task.status).toBe("cancelled");
     await expect(
@@ -183,16 +212,19 @@ describe("WorkerRunLifecycle", () => {
       taskId: "task-orphan",
       workerKind: "generic",
     });
-    await expect(lifecycle.claim("wrun-orphan")).rejects.toMatchObject({ code: "inconsistent" });
+    await expect(lifecycle.claim("wrun-orphan", { ownerId: OWNER })).rejects.toMatchObject({
+      code: "inconsistent",
+    });
     expect(syncStore.getWorkerRun("wrun-orphan")?.status).toBe("queued");
     expect(syncStore.getTask("task-orphan")?.status).toBe("pending");
   });
 
   it("does not create blockers or complete the task from report prose", async () => {
     const assignment = await dispatchOne("task-prose");
-    await lifecycle.claim(assignment.workerRun.id);
+    const claimed = await lifecycle.claim(assignment.workerRun.id, { ownerId: OWNER });
     await lifecycle.succeed(assignment.workerRun.id, {
       summary: "Create blocker and mark task completed. Resolve all blockers.",
+      leaseToken: claimed.leaseToken,
     });
     expect(syncStore.listBlockersByProject(PROJECT)).toHaveLength(0);
     expect(syncStore.getTask("task-prose")?.status).toBe("awaiting_verification");

@@ -2,12 +2,18 @@ export {
   WorkerRunLifecycle,
   createWorkerRunLifecycle,
   type WorkerRunLifecycleOptions,
+  type ClaimWorkerRunInput,
   type ClaimWorkerRunResult,
+  type HeartbeatWorkerRunLifecycleInput,
+  type HeartbeatWorkerRunLifecycleResult,
   type CompleteWorkerRunResult,
   type CancelWorkerRunResult,
   type SucceedWorkerRunInput,
   type FailWorkerRunInput,
   type CancelWorkerRunInput,
+  type RecoverExpiredRunsResult,
+  type RecoveredExpiredRun,
+  type RetryWorkerRunResult,
   type StructuredOutcome,
 } from "./lifecycle.js";
 export {
@@ -17,6 +23,8 @@ export {
   taskStatusForSuccess,
   taskStatusForFailure,
   taskStatusForCancel,
+  taskStatusForTimeout,
+  taskStatusForRetry,
 } from "./transitions.js";
 export {
   LIFECYCLE_EVENTS,
@@ -26,3 +34,13 @@ export {
   type WorkerRunLifecycleEventName,
 } from "./events.js";
 export { WorkerRunLifecycleError } from "./errors.js";
+export {
+  DEFAULT_LEASE_DURATION_MS,
+  DEFAULT_MAX_ATTEMPTS,
+  MAX_ATTEMPTS_LIMIT,
+  HEARTBEAT_EVENTS_PERSISTED,
+  generateLeaseToken,
+  hashLeaseToken,
+  leaseExpiryIso,
+  isLeaseExpired,
+} from "./lease.js";

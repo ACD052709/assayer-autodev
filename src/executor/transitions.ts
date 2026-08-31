@@ -8,14 +8,14 @@ import {
  * Allowed worker_run transitions. Terminal states have no outgoing edges.
  *
  * queued   → running | cancelled
- * running  → succeeded | failed | cancelled
+ * running  → succeeded | failed | cancelled | timed_out
  * succeeded/failed/cancelled/timed_out → (none)
  */
 export const ALLOWED_WORKER_RUN_TRANSITIONS: Readonly<
   Record<WorkerRunStatus, readonly WorkerRunStatus[]>
 > = {
   queued: ["running", "cancelled"],
-  running: ["succeeded", "failed", "cancelled"],
+  running: ["succeeded", "failed", "cancelled", "timed_out"],
   succeeded: [],
   failed: [],
   cancelled: [],
@@ -39,6 +39,14 @@ export function taskStatusForSuccess(): { from: readonly TaskStatus[]; to: TaskS
 
 export function taskStatusForFailure(): { from: readonly TaskStatus[]; to: TaskStatus } {
   return { from: ["in_progress"], to: "failed" };
+}
+
+export function taskStatusForTimeout(): { from: readonly TaskStatus[]; to: TaskStatus } {
+  return { from: ["in_progress"], to: "failed" };
+}
+
+export function taskStatusForRetry(): { from: readonly TaskStatus[]; to: TaskStatus } {
+  return { from: ["failed"], to: "assigned" };
 }
 
 export function taskStatusForCancel(fromRun: WorkerRunStatus): {

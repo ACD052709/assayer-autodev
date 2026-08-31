@@ -28,6 +28,12 @@ import type {
   CreateVerifierRunInput,
   AssignTaskToWorkerRunInput,
   ApplyWorkerRunTaskTransitionInput,
+  ClaimQueuedWorkerRunInput,
+  ClaimQueuedWorkerRunResult,
+  HeartbeatWorkerRunInput,
+  HeartbeatWorkerRunResult,
+  RequeueTimedOutWorkerRunInput,
+  VerifyWorkerRunLeaseResult,
   CreateWorkerEventInput,
   CreateWorkerReportInput,
   CreateWorkerRunInput,
@@ -66,6 +72,7 @@ import type {
 } from "../domain/index.js";
 import { createTimestamps, nowIso, touchTimestamps, withStatus } from "../domain/common.js";
 import { isTerminalWorkerRunStatus } from "../domain/worker.js";
+import { isLeaseExpired, timingSafeEqual } from "../executor/lease.js";
 import {
   BudgetResourceConflictError,
   limitsForBudgetResource,
@@ -160,6 +167,10 @@ interface WorkerRunRow {
   started_at: string | null;
   completed_at: string | null;
   error_message: string | null;
+  owner_id: string | null;
+  lease_token_hash: string | null;
+  lease_expires_at: string | null;
+  last_heartbeat_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -465,6 +476,9 @@ function rowToWorkerRun(row: WorkerRunRow): WorkerRun {
   const startedAt = optionalString(row.started_at);
   const completedAt = optionalString(row.completed_at);
   const errorMessage = optionalString(row.error_message);
+  const ownerId = optionalString(row.owner_id);
+  const leaseExpiresAt = optionalString(row.lease_expires_at);
+  const lastHeartbeatAt = optionalString(row.last_heartbeat_at);
   return {
     id: row.id,
     projectId: row.project_id,
@@ -478,6 +492,9 @@ function rowToWorkerRun(row: WorkerRunRow): WorkerRun {
     ...(startedAt !== undefined ? { startedAt } : {}),
     ...(completedAt !== undefined ? { completedAt } : {}),
     ...(errorMessage !== undefined ? { errorMessage } : {}),
+    ...(ownerId !== undefined ? { ownerId } : {}),
+    ...(leaseExpiresAt !== undefined ? { leaseExpiresAt } : {}),
+    ...(lastHeartbeatAt !== undefined ? { lastHeartbeatAt } : {}),
   };
 }
 
@@ -1175,21 +1192,37 @@ export class D1StateStore implements AsyncStateStore {
       return { ok: false, reason: "illegal_transition" };
     }
 
-    const at = nowIso();
+    const at = input.at ?? nowIso();
     const startedAt =
       input.toRunStatus === "running" ? (run.startedAt ?? at) : (run.startedAt ?? null);
     const completedAt = isTerminalWorkerRunStatus(input.toRunStatus)
       ? (run.completedAt ?? at)
       : (run.completedAt ?? null);
     const errorMessage = input.errorMessage ?? run.errorMessage ?? null;
+    const clearHash = isTerminalWorkerRunStatus(input.toRunStatus) ? 1 : 0;
+    const clearExpiry =
+      isTerminalWorkerRunStatus(input.toRunStatus) && input.toRunStatus !== "timed_out" ? 1 : 0;
     const fromRunSql = sqlQuotedStatuses(input.fromRunStatuses);
     const fromTaskSql = sqlQuotedStatuses(input.fromTaskStatuses);
+    const leaseClause =
+      input.leaseTokenHash !== undefined
+        ? ` AND lease_token_hash = ? AND lease_expires_at IS NOT NULL AND lease_expires_at > ?`
+        : "";
+    const leaseBinds =
+      input.leaseTokenHash !== undefined ? [input.leaseTokenHash, input.now ?? at] : [];
 
     const results = await this.db.batch([
       this.db
         .prepare(
           `UPDATE worker_runs
-           SET status = ?, status_changed_at = ?, started_at = ?, completed_at = ?, error_message = ?, updated_at = ?
+           SET status = ?,
+               status_changed_at = ?,
+               started_at = ?,
+               completed_at = ?,
+               error_message = ?,
+               updated_at = ?,
+               lease_token_hash = CASE WHEN ? = 1 THEN NULL ELSE lease_token_hash END,
+               lease_expires_at = CASE WHEN ? = 1 THEN NULL ELSE lease_expires_at END
            WHERE id = ?
              AND status IN (${fromRunSql})
              AND EXISTS (
@@ -1198,7 +1231,7 @@ export class D1StateStore implements AsyncStateStore {
                  AND tasks.project_id = worker_runs.project_id
                  AND tasks.assigned_worker_run_id = worker_runs.id
                  AND tasks.status IN (${fromTaskSql})
-             )`,
+             )${leaseClause}`,
         )
         .bind(
           input.toRunStatus,
@@ -1207,7 +1240,10 @@ export class D1StateStore implements AsyncStateStore {
           completedAt,
           errorMessage,
           at,
+          clearHash,
+          clearExpiry,
           input.workerRunId,
+          ...leaseBinds,
         ),
       this.db
         .prepare(
@@ -1246,7 +1282,278 @@ export class D1StateStore implements AsyncStateStore {
     if (currentTask.assignedWorkerRunId !== currentRun.id || currentTask.projectId !== currentRun.projectId) {
       return { ok: false, reason: "inconsistent" };
     }
+    if (input.leaseTokenHash !== undefined && currentRun.status === "running") {
+      const lease = await this.diagnoseLease(
+        input.workerRunId,
+        input.leaseTokenHash,
+        input.now ?? at,
+      );
+      if (!lease.ok) {
+        return lease;
+      }
+    }
     return { ok: false, reason: "illegal_transition" };
+  }
+
+  async claimQueuedWorkerRun(input: ClaimQueuedWorkerRunInput): Promise<ClaimQueuedWorkerRunResult> {
+    const run = await this.getWorkerRun(input.workerRunId);
+    if (run === undefined) {
+      return { ok: false, reason: "not_found" };
+    }
+    if (run.taskId === undefined) {
+      return { ok: false, reason: "inconsistent" };
+    }
+    const task = await this.getTask(run.taskId);
+    if (task === undefined) {
+      return { ok: false, reason: "not_found" };
+    }
+    if (task.projectId !== run.projectId || task.assignedWorkerRunId !== run.id) {
+      return { ok: false, reason: "inconsistent" };
+    }
+    if (run.status === "running") {
+      return { ok: false, reason: "already_claimed" };
+    }
+    if (run.status !== "queued" || task.status !== "assigned") {
+      return { ok: false, reason: "illegal_transition" };
+    }
+
+    const at = input.at;
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE worker_runs
+           SET status = ?,
+               status_changed_at = ?,
+               started_at = COALESCE(started_at, ?),
+               owner_id = ?,
+               lease_token_hash = ?,
+               lease_expires_at = ?,
+               last_heartbeat_at = ?,
+               updated_at = ?
+           WHERE id = ?
+             AND status = 'queued'
+             AND EXISTS (
+               SELECT 1 FROM tasks
+               WHERE tasks.id = worker_runs.task_id
+                 AND tasks.project_id = worker_runs.project_id
+                 AND tasks.assigned_worker_run_id = worker_runs.id
+                 AND tasks.status = 'assigned'
+             )`,
+        )
+        .bind(
+          "running",
+          at,
+          at,
+          input.ownerId,
+          input.leaseTokenHash,
+          input.leaseExpiresAt,
+          input.lastHeartbeatAt,
+          at,
+          input.workerRunId,
+        ),
+      this.db
+        .prepare(
+          `UPDATE tasks
+           SET status = ?, status_changed_at = ?, updated_at = ?
+           WHERE id = ?
+             AND project_id = ?
+             AND assigned_worker_run_id = ?
+             AND status = 'assigned'`,
+        )
+        .bind("in_progress", at, at, task.id, run.projectId, run.id),
+    ]);
+
+    const runChanges = results[0]?.meta.changes ?? 0;
+    const taskChanges = results[1]?.meta.changes ?? 0;
+    if (runChanges > 0 && taskChanges > 0) {
+      const updatedRun = await this.getWorkerRun(input.workerRunId);
+      const updatedTask = await this.getTask(task.id);
+      if (updatedRun === undefined || updatedTask === undefined) {
+        return { ok: false, reason: "not_found" };
+      }
+      return { ok: true, task: updatedTask, workerRun: updatedRun };
+    }
+
+    const currentRun = await this.getWorkerRun(input.workerRunId);
+    if (currentRun?.status === "running") {
+      return { ok: false, reason: "already_claimed" };
+    }
+    return { ok: false, reason: "illegal_transition" };
+  }
+
+  async heartbeatWorkerRun(input: HeartbeatWorkerRunInput): Promise<HeartbeatWorkerRunResult> {
+    const diagnosed = await this.diagnoseLease(input.workerRunId, input.leaseTokenHash, input.now);
+    if (!diagnosed.ok) {
+      return diagnosed;
+    }
+    const result = await this.db
+      .prepare(
+        `UPDATE worker_runs
+         SET last_heartbeat_at = ?, lease_expires_at = ?, updated_at = ?
+         WHERE id = ?
+           AND status = 'running'
+           AND lease_token_hash = ?
+           AND lease_expires_at IS NOT NULL
+           AND lease_expires_at > ?`,
+      )
+      .bind(
+        input.lastHeartbeatAt,
+        input.leaseExpiresAt,
+        input.lastHeartbeatAt,
+        input.workerRunId,
+        input.leaseTokenHash,
+        input.now,
+      )
+      .run();
+    if ((result.meta.changes ?? 0) === 0) {
+      const again = await this.diagnoseLease(input.workerRunId, input.leaseTokenHash, input.now);
+      if (!again.ok) {
+        return again;
+      }
+      return { ok: false, reason: "expired" };
+    }
+    const updated = await this.getWorkerRun(input.workerRunId);
+    if (updated === undefined) {
+      return { ok: false, reason: "not_found" };
+    }
+    return { ok: true, workerRun: updated };
+  }
+
+  async verifyWorkerRunLease(
+    workerRunId: EntityId,
+    leaseTokenHash: string,
+    now: string,
+  ): Promise<VerifyWorkerRunLeaseResult> {
+    return this.diagnoseLease(workerRunId, leaseTokenHash, now);
+  }
+
+  async listExpiredRunningWorkerRuns(projectId: EntityId, now: string): Promise<readonly WorkerRun[]> {
+    const result = await this.db
+      .prepare(
+        `SELECT * FROM worker_runs
+         WHERE project_id = ?
+           AND status = 'running'
+           AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+         ORDER BY created_at ASC, id ASC`,
+      )
+      .bind(projectId, now)
+      .all<WorkerRunRow>();
+    return (result.results ?? []).map(rowToWorkerRun);
+  }
+
+  async requeueTimedOutWorkerRun(
+    input: RequeueTimedOutWorkerRunInput,
+  ): Promise<TaskWorkerAssignment | undefined> {
+    const previous = await this.getWorkerRun(input.previousWorkerRunId);
+    if (previous === undefined || previous.projectId !== input.projectId) {
+      return undefined;
+    }
+    if (previous.status !== "timed_out" || previous.taskId === undefined) {
+      return undefined;
+    }
+    const task = await this.getTask(previous.taskId);
+    if (task === undefined || task.projectId !== input.projectId) {
+      return undefined;
+    }
+    if (task.assignedWorkerRunId !== previous.id || task.status !== "failed") {
+      return undefined;
+    }
+
+    const active = await this.db
+      .prepare(
+        `SELECT id FROM worker_runs
+         WHERE task_id = ?
+           AND status IN ('queued', 'running')
+         LIMIT 1`,
+      )
+      .bind(task.id)
+      .first<{ id: string }>();
+    if (active !== undefined && active !== null) {
+      return undefined;
+    }
+    const existingNew = await this.getWorkerRun(input.newWorkerRunId);
+    if (existingNew !== undefined) {
+      return undefined;
+    }
+
+    const at = input.at ?? nowIso();
+    const workerRun: WorkerRun = {
+      id: input.newWorkerRunId,
+      projectId: input.projectId,
+      taskId: task.id,
+      workerKind: previous.workerKind,
+      iteration: previous.iteration + 1,
+      ...createTimestamps(at),
+      ...withStatus("queued", at),
+    };
+
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `INSERT INTO worker_runs
+           (id, project_id, task_id, worker_kind, iteration, status, status_changed_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          workerRun.id,
+          workerRun.projectId,
+          workerRun.taskId,
+          workerRun.workerKind,
+          workerRun.iteration,
+          workerRun.status,
+          workerRun.statusChangedAt,
+          workerRun.createdAt,
+          workerRun.updatedAt,
+        ),
+      this.db
+        .prepare(
+          `UPDATE tasks
+           SET assigned_worker_run_id = ?, status = ?, status_changed_at = ?, updated_at = ?
+           WHERE id = ?
+             AND project_id = ?
+             AND assigned_worker_run_id = ?
+             AND status = 'failed'`,
+        )
+        .bind(workerRun.id, "assigned", at, at, task.id, input.projectId, previous.id),
+    ]);
+
+    const taskChanges = results[1]?.meta.changes ?? 0;
+    if (taskChanges > 0) {
+      const updatedTask = await this.getTask(task.id);
+      if (updatedTask === undefined) {
+        return undefined;
+      }
+      return { task: updatedTask, workerRun, created: true };
+    }
+
+    await this.db.prepare(`DELETE FROM worker_runs WHERE id = ?`).bind(workerRun.id).run();
+    return undefined;
+  }
+
+  private async diagnoseLease(
+    workerRunId: EntityId,
+    leaseTokenHash: string,
+    now: string,
+  ): Promise<VerifyWorkerRunLeaseResult> {
+    const row = await this.db
+      .prepare(`SELECT status, lease_token_hash, lease_expires_at FROM worker_runs WHERE id = ?`)
+      .bind(workerRunId)
+      .first<{ status: string; lease_token_hash: string | null; lease_expires_at: string | null }>();
+    if (row === undefined || row === null) {
+      return { ok: false, reason: "not_found" };
+    }
+    if (row.status !== "running") {
+      return { ok: false, reason: "illegal_transition" };
+    }
+    const storedHash = optionalString(row.lease_token_hash);
+    if (storedHash === undefined || !timingSafeEqual(storedHash, leaseTokenHash)) {
+      return { ok: false, reason: "unauthorized" };
+    }
+    const expiresAt = optionalString(row.lease_expires_at);
+    if (isLeaseExpired(expiresAt, now)) {
+      return { ok: false, reason: "expired" };
+    }
+    return { ok: true };
   }
 
   async updateWorkerRunStatus(

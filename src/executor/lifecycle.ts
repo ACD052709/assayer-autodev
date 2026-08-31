@@ -1,11 +1,13 @@
 import type {
   EntityId,
+  ISOTimestamp,
   MasterInboxItem,
   Task,
   WorkerEvent,
   WorkerReport,
   WorkerRun,
 } from "../domain/index.js";
+import { nowIso } from "../domain/common.js";
 import type { IdFactory } from "../master/ids.js";
 import { createRandomIdFactory } from "../master/ids.js";
 import type { AsyncStateStore } from "../state/async-store.js";
@@ -20,10 +22,18 @@ import {
 } from "./events.js";
 import { WorkerRunLifecycleError } from "./errors.js";
 import {
+  DEFAULT_LEASE_DURATION_MS,
+  DEFAULT_MAX_ATTEMPTS,
+  MAX_ATTEMPTS_LIMIT,
+  generateLeaseToken,
+  hashLeaseToken,
+  leaseExpiryIso,
+} from "./lease.js";
+import {
   taskStatusForCancel,
-  taskStatusForClaim,
   taskStatusForFailure,
   taskStatusForSuccess,
+  taskStatusForTimeout,
 } from "./transitions.js";
 
 export type StructuredOutcome = Readonly<Record<string, string | number | boolean>>;
@@ -32,20 +42,34 @@ export interface WorkerRunLifecycleOptions {
   readonly store: AsyncStateStore;
   readonly idFactory?: IdFactory;
   readonly dispatcher?: WorkerDispatcher;
+  readonly now?: () => ISOTimestamp;
+  readonly leaseDurationMs?: number;
+  readonly maxAttempts?: number;
+}
+
+export interface ClaimWorkerRunInput {
+  readonly ownerId: EntityId;
 }
 
 export interface SucceedWorkerRunInput {
   readonly summary: string;
+  readonly leaseToken: string;
   readonly structuredOutcome?: StructuredOutcome;
 }
 
 export interface FailWorkerRunInput {
   readonly errorCode: string;
   readonly summary: string;
+  readonly leaseToken: string;
 }
 
 export interface CancelWorkerRunInput {
   readonly reason: string;
+  readonly leaseToken?: string;
+}
+
+export interface HeartbeatWorkerRunLifecycleInput {
+  readonly leaseToken: string;
 }
 
 export interface ClaimWorkerRunResult {
@@ -53,6 +77,11 @@ export interface ClaimWorkerRunResult {
   readonly task: Task;
   readonly event: WorkerEvent;
   readonly claimed: boolean;
+  readonly leaseToken: string;
+}
+
+export interface HeartbeatWorkerRunLifecycleResult {
+  readonly workerRun: WorkerRun;
 }
 
 export interface CompleteWorkerRunResult {
@@ -71,10 +100,33 @@ export interface CancelWorkerRunResult {
   readonly applied: boolean;
 }
 
+export interface RecoveredExpiredRun {
+  readonly workerRun: WorkerRun;
+  readonly task: Task;
+  readonly event: WorkerEvent;
+  readonly report: WorkerReport;
+  readonly inboxItem: MasterInboxItem;
+  readonly applied: boolean;
+}
+
+export interface RecoverExpiredRunsResult {
+  readonly recovered: readonly RecoveredExpiredRun[];
+}
+
+export interface RetryWorkerRunResult {
+  readonly previousWorkerRun: WorkerRun;
+  readonly workerRun: WorkerRun;
+  readonly task: Task;
+  readonly event: WorkerEvent;
+}
+
 const MAX_SUMMARY_CHARS = 2000;
 const MAX_STRUCTURED_KEYS = 16;
 const STRUCTURED_KEY_PATTERN = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
 const ERROR_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+const OWNER_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
+const TIMEOUT_ERROR_CODE = "LEASE_EXPIRED";
+const TIMEOUT_SUMMARY = "Worker lease expired without a heartbeat.";
 
 export function sanitizeSummary(value: string, field = "summary"): string {
   const trimmed = value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " ").trim();
@@ -140,7 +192,30 @@ function metricsFromStructuredOutcome(
   return Object.keys(metrics).length > 0 ? metrics : undefined;
 }
 
-function throwForTransition(reason: "not_found" | "inconsistent" | "illegal_transition"): never {
+function assertOwnerId(value: string): EntityId {
+  if (!OWNER_ID_PATTERN.test(value)) {
+    throw new WorkerRunLifecycleError("validation", "Invalid ownerId");
+  }
+  return value;
+}
+
+function assertLeaseToken(value: string): string {
+  if (value.length < 32 || value.length > 256 || /[\u0000-\u001F]/.test(value)) {
+    throw new WorkerRunLifecycleError("validation", "Invalid leaseToken");
+  }
+  return value;
+}
+
+function clampMaxAttempts(value: number): number {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new WorkerRunLifecycleError("validation", "maxAttempts must be a positive integer");
+  }
+  return Math.min(value, MAX_ATTEMPTS_LIMIT);
+}
+
+function throwForTransition(
+  reason: "not_found" | "inconsistent" | "illegal_transition" | "unauthorized" | "expired" | "already_claimed",
+): never {
   if (reason === "not_found") {
     throw new WorkerRunLifecycleError("not_found", "Worker run or task not found");
   }
@@ -150,35 +225,56 @@ function throwForTransition(reason: "not_found" | "inconsistent" | "illegal_tran
       "Worker run and task assignment are inconsistent",
     );
   }
+  if (reason === "unauthorized") {
+    throw new WorkerRunLifecycleError("unauthorized", "Lease token is not valid for this worker run");
+  }
+  if (reason === "expired") {
+    throw new WorkerRunLifecycleError("expired", "Worker-run lease has expired");
+  }
+  if (reason === "already_claimed") {
+    throw new WorkerRunLifecycleError("conflict", "Worker run is already claimed");
+  }
   throw new WorkerRunLifecycleError("illegal_transition", "Illegal worker-run transition");
 }
 
 /**
- * Control-plane worker-run lifecycle. Claims, completes, and cancels runs.
+ * Control-plane worker-run lifecycle. Claims, heartbeats, completes, times out, and retries runs.
  * Does not execute coding work.
  */
 export class WorkerRunLifecycle {
   private readonly store: AsyncStateStore;
   private readonly reports: WorkerDispatcher;
+  private readonly ids: IdFactory;
+  private readonly nowFn: () => ISOTimestamp;
+  private readonly leaseDurationMs: number;
+  private readonly maxAttempts: number;
 
   constructor(options: WorkerRunLifecycleOptions) {
     this.store = options.store;
+    this.ids = options.idFactory ?? createRandomIdFactory();
     this.reports =
       options.dispatcher ??
       createWorkerDispatcher({
         store: options.store,
-        idFactory: options.idFactory ?? createRandomIdFactory(),
+        idFactory: this.ids,
       });
+    this.nowFn = options.now ?? nowIso;
+    this.leaseDurationMs = options.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
+    this.maxAttempts = clampMaxAttempts(options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
   }
 
-  async claim(workerRunId: EntityId): Promise<ClaimWorkerRunResult> {
-    const taskStatuses = taskStatusForClaim();
-    const result = await this.store.applyWorkerRunTaskTransition({
+  async claim(workerRunId: EntityId, input: ClaimWorkerRunInput): Promise<ClaimWorkerRunResult> {
+    const ownerId = assertOwnerId(input.ownerId);
+    const at = this.nowFn();
+    const leaseToken = generateLeaseToken();
+    const leaseTokenHash = await hashLeaseToken(leaseToken);
+    const result = await this.store.claimQueuedWorkerRun({
       workerRunId,
-      fromRunStatuses: ["queued"],
-      toRunStatus: "running",
-      fromTaskStatuses: taskStatuses.from,
-      toTaskStatus: taskStatuses.to,
+      ownerId,
+      leaseTokenHash,
+      leaseExpiresAt: leaseExpiryIso(at, this.leaseDurationMs),
+      lastHeartbeatAt: at,
+      at,
     });
     if (!result.ok) {
       throwForTransition(result.reason);
@@ -187,21 +283,44 @@ export class WorkerRunLifecycle {
       fromStatus: "queued",
       toStatus: "running",
       taskStatus: result.task.status,
+      ownerId,
     });
     return {
       workerRun: result.workerRun,
       task: result.task,
       event,
-      claimed: result.applied,
+      claimed: true,
+      leaseToken,
     };
+  }
+
+  async heartbeat(
+    workerRunId: EntityId,
+    input: HeartbeatWorkerRunLifecycleInput,
+  ): Promise<HeartbeatWorkerRunLifecycleResult> {
+    const leaseToken = assertLeaseToken(input.leaseToken);
+    const at = this.nowFn();
+    const result = await this.store.heartbeatWorkerRun({
+      workerRunId,
+      leaseTokenHash: await hashLeaseToken(leaseToken),
+      lastHeartbeatAt: at,
+      leaseExpiresAt: leaseExpiryIso(at, this.leaseDurationMs),
+      now: at,
+    });
+    if (!result.ok) {
+      throwForTransition(result.reason);
+    }
+    return { workerRun: result.workerRun };
   }
 
   async succeed(workerRunId: EntityId, input: SucceedWorkerRunInput): Promise<CompleteWorkerRunResult> {
     const summary = sanitizeSummary(input.summary);
+    const leaseToken = assertLeaseToken(input.leaseToken);
     const structuredOutcome =
       input.structuredOutcome !== undefined
         ? constrainStructuredOutcome(input.structuredOutcome)
         : undefined;
+    const at = this.nowFn();
     const taskStatuses = taskStatusForSuccess();
     const result = await this.store.applyWorkerRunTaskTransition({
       workerRunId,
@@ -209,6 +328,9 @@ export class WorkerRunLifecycle {
       toRunStatus: "succeeded",
       fromTaskStatuses: taskStatuses.from,
       toTaskStatus: taskStatuses.to,
+      at,
+      now: at,
+      leaseTokenHash: await hashLeaseToken(leaseToken),
     });
     if (!result.ok) {
       throwForTransition(result.reason);
@@ -239,6 +361,8 @@ export class WorkerRunLifecycle {
   async fail(workerRunId: EntityId, input: FailWorkerRunInput): Promise<CompleteWorkerRunResult> {
     const errorCode = sanitizeErrorCode(input.errorCode);
     const summary = sanitizeSummary(input.summary);
+    const leaseToken = assertLeaseToken(input.leaseToken);
+    const at = this.nowFn();
     const taskStatuses = taskStatusForFailure();
     const result = await this.store.applyWorkerRunTaskTransition({
       workerRunId,
@@ -247,6 +371,9 @@ export class WorkerRunLifecycle {
       fromTaskStatuses: taskStatuses.from,
       toTaskStatus: taskStatuses.to,
       errorMessage: `${errorCode}: ${summary}`,
+      at,
+      now: at,
+      leaseTokenHash: await hashLeaseToken(leaseToken),
     });
     if (!result.ok) {
       throwForTransition(result.reason);
@@ -282,16 +409,110 @@ export class WorkerRunLifecycle {
       return this.cancelFrom(existing, "queued", reason);
     }
     if (existing.status === "running") {
-      return this.cancelFrom(existing, "running", reason);
+      if (input.leaseToken === undefined) {
+        throw new WorkerRunLifecycleError("validation", "leaseToken is required to cancel a running worker run");
+      }
+      return this.cancelFrom(existing, "running", reason, assertLeaseToken(input.leaseToken));
     }
     throw new WorkerRunLifecycleError("illegal_transition", "Cannot cancel a terminal worker run");
+  }
+
+  async recoverExpiredRuns(projectId: EntityId): Promise<RecoverExpiredRunsResult> {
+    const project = await this.store.getProject(projectId);
+    if (project === undefined) {
+      throw new WorkerRunLifecycleError("not_found", `Project not found: ${projectId}`);
+    }
+    const at = this.nowFn();
+    const expired = await this.store.listExpiredRunningWorkerRuns(projectId, at);
+    const recovered: RecoveredExpiredRun[] = [];
+    const taskStatuses = taskStatusForTimeout();
+    for (const run of expired) {
+      const result = await this.store.applyWorkerRunTaskTransition({
+        workerRunId: run.id,
+        fromRunStatuses: ["running"],
+        toRunStatus: "timed_out",
+        fromTaskStatuses: taskStatuses.from,
+        toTaskStatus: taskStatuses.to,
+        errorMessage: `${TIMEOUT_ERROR_CODE}: ${TIMEOUT_SUMMARY}`,
+        at,
+      });
+      if (!result.ok) {
+        continue;
+      }
+      const event = await this.ensureLifecycleEvent(result.workerRun, LIFECYCLE_EVENTS.TIMED_OUT, {
+        fromStatus: "running",
+        toStatus: "timed_out",
+        taskStatus: result.task.status,
+        ...(result.workerRun.ownerId !== undefined ? { ownerId: result.workerRun.ownerId } : {}),
+        ...(result.workerRun.leaseExpiresAt !== undefined
+          ? { leaseExpiresAt: result.workerRun.leaseExpiresAt }
+          : {}),
+      });
+      const persisted = await this.persistTerminalReport(result.workerRun, {
+        summary: TIMEOUT_SUMMARY,
+        outcome: "failure",
+        errorCode: TIMEOUT_ERROR_CODE,
+      });
+      recovered.push({
+        workerRun: result.workerRun,
+        task: result.task,
+        event,
+        report: persisted.report,
+        inboxItem: persisted.inboxItem,
+        applied: result.applied,
+      });
+    }
+    return { recovered: recovered.filter((item) => item.applied) };
+  }
+
+  async retry(workerRunId: EntityId): Promise<RetryWorkerRunResult> {
+    const previous = await this.store.getWorkerRun(workerRunId);
+    if (previous === undefined) {
+      throw new WorkerRunLifecycleError("not_found", `Worker run not found: ${workerRunId}`);
+    }
+    if (previous.status !== "timed_out") {
+      throw new WorkerRunLifecycleError("illegal_transition", "Only timed_out worker runs can be retried");
+    }
+    if (previous.iteration >= this.maxAttempts) {
+      throw new WorkerRunLifecycleError("conflict", "Maximum worker-run attempts reached");
+    }
+    const at = this.nowFn();
+    const assignment = await this.store.requeueTimedOutWorkerRun({
+      previousWorkerRunId: previous.id,
+      newWorkerRunId: this.ids.next("wrun"),
+      projectId: previous.projectId,
+      at,
+    });
+    if (assignment === undefined) {
+      throw new WorkerRunLifecycleError(
+        "conflict",
+        "Cannot requeue timed-out worker run (task already has an active run or is not in recovery state)",
+      );
+    }
+    const unchanged = await this.store.getWorkerRun(previous.id);
+    if (unchanged === undefined || unchanged.status !== "timed_out") {
+      throw new WorkerRunLifecycleError("inconsistent", "Previous worker run was mutated during retry");
+    }
+    const event = await this.ensureLifecycleEvent(assignment.workerRun, LIFECYCLE_EVENTS.RETRY_CREATED, {
+      previousWorkerRunId: previous.id,
+      iteration: assignment.workerRun.iteration,
+      taskStatus: assignment.task.status,
+    });
+    return {
+      previousWorkerRun: unchanged,
+      workerRun: assignment.workerRun,
+      task: assignment.task,
+      event,
+    };
   }
 
   private async cancelFrom(
     existing: WorkerRun,
     fromStatus: "queued" | "running",
     reason: string,
+    leaseToken?: string,
   ): Promise<CancelWorkerRunResult> {
+    const at = this.nowFn();
     const taskStatuses = taskStatusForCancel(fromStatus);
     const result = await this.store.applyWorkerRunTaskTransition({
       workerRunId: existing.id,
@@ -300,6 +521,10 @@ export class WorkerRunLifecycle {
       fromTaskStatuses: taskStatuses.from,
       toTaskStatus: taskStatuses.to,
       errorMessage: reason,
+      at,
+      ...(leaseToken !== undefined
+        ? { leaseTokenHash: await hashLeaseToken(leaseToken), now: at }
+        : {}),
     });
     if (!result.ok) {
       throwForTransition(result.reason);

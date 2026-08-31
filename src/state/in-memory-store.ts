@@ -26,6 +26,12 @@ import type {
   CreateVerifierRunInput,
   AssignTaskToWorkerRunInput,
   ApplyWorkerRunTaskTransitionInput,
+  ClaimQueuedWorkerRunInput,
+  ClaimQueuedWorkerRunResult,
+  HeartbeatWorkerRunInput,
+  HeartbeatWorkerRunResult,
+  RequeueTimedOutWorkerRunInput,
+  VerifyWorkerRunLeaseResult,
   CreateWorkerEventInput,
   CreateWorkerReportInput,
   CreateWorkerRunInput,
@@ -60,6 +66,7 @@ import type {
 } from "../domain/index.js";
 import { createTimestamps, nowIso, touchTimestamps, withStatus } from "../domain/common.js";
 import { isTerminalWorkerRunStatus } from "../domain/worker.js";
+import { isLeaseExpired, timingSafeEqual } from "../executor/lease.js";
 import {
   BudgetResourceConflictError,
   limitsForBudgetResource,
@@ -78,6 +85,15 @@ function compareWorkerRuns(a: WorkerRun, b: WorkerRun): number {
   return byTime !== 0 ? byTime : a.id.localeCompare(b.id);
 }
 
+function withoutLeaseExpiry(run: WorkerRun): WorkerRun {
+  const { leaseExpiresAt: _removed, ...rest } = run;
+  return rest;
+}
+
+function isNonterminalWorkerRunStatus(status: WorkerRun["status"]): boolean {
+  return status === "queued" || status === "running";
+}
+
 export class InMemoryStateStore implements StateStore {
   private readonly projects = new Map<EntityId, Project>();
   private readonly requirements = new Map<EntityId, Requirement>();
@@ -85,6 +101,7 @@ export class InMemoryStateStore implements StateStore {
   private readonly tasks = new Map<EntityId, Task>();
   private readonly taskDependencies = new Map<EntityId, TaskDependency[]>();
   private readonly workerRuns = new Map<EntityId, WorkerRun>();
+  private readonly leaseTokenHashes = new Map<EntityId, string>();
   private readonly workerEvents = new Map<EntityId, WorkerEvent[]>();
   private readonly workerReports = new Map<EntityId, WorkerReport>();
   private readonly testCases = new Map<EntityId, TestCase>();
@@ -312,8 +329,21 @@ export class InMemoryStateStore implements StateStore {
     ) {
       return { ok: false, reason: "illegal_transition" };
     }
+    if (input.leaseTokenHash !== undefined) {
+      const storedHash = this.leaseTokenHashes.get(run.id);
+      const now = input.now ?? nowIso();
+      if (storedHash === undefined || !timingSafeEqual(storedHash, input.leaseTokenHash)) {
+        return { ok: false, reason: "unauthorized" };
+      }
+      if (isLeaseExpired(run.leaseExpiresAt, now)) {
+        return { ok: false, reason: "expired" };
+      }
+    }
 
-    const at = nowIso();
+    const at = input.at ?? nowIso();
+    if (isTerminalWorkerRunStatus(input.toRunStatus)) {
+      this.leaseTokenHashes.delete(run.id);
+    }
     const updatedRun: WorkerRun = {
       ...run,
       ...withStatus(input.toRunStatus, at),
@@ -322,14 +352,162 @@ export class InMemoryStateStore implements StateStore {
       ...(isTerminalWorkerRunStatus(input.toRunStatus) ? { completedAt: run.completedAt ?? at } : {}),
       ...(input.errorMessage !== undefined ? { errorMessage: input.errorMessage } : {}),
     };
+    const storedRun =
+      isTerminalWorkerRunStatus(input.toRunStatus) && input.toRunStatus !== "timed_out"
+        ? withoutLeaseExpiry(updatedRun)
+        : updatedRun;
     const updatedTask: Task = {
       ...task,
       ...withStatus(input.toTaskStatus, at),
       ...touchTimestamps(task, at),
     };
+    this.workerRuns.set(run.id, storedRun);
+    this.tasks.set(task.id, updatedTask);
+    return { ok: true, applied: true, task: updatedTask, workerRun: storedRun };
+  }
+
+  claimQueuedWorkerRun(input: ClaimQueuedWorkerRunInput): ClaimQueuedWorkerRunResult {
+    const run = this.workerRuns.get(input.workerRunId);
+    if (run === undefined) {
+      return { ok: false, reason: "not_found" };
+    }
+    if (run.taskId === undefined) {
+      return { ok: false, reason: "inconsistent" };
+    }
+    const task = this.tasks.get(run.taskId);
+    if (task === undefined) {
+      return { ok: false, reason: "not_found" };
+    }
+    if (task.projectId !== run.projectId || task.assignedWorkerRunId !== run.id) {
+      return { ok: false, reason: "inconsistent" };
+    }
+    if (run.status === "running") {
+      return { ok: false, reason: "already_claimed" };
+    }
+    if (run.status !== "queued" || task.status !== "assigned") {
+      return { ok: false, reason: "illegal_transition" };
+    }
+
+    const at = input.at;
+    const updatedRun: WorkerRun = {
+      ...run,
+      ...withStatus("running", at),
+      ...touchTimestamps(run, at),
+      startedAt: run.startedAt ?? at,
+      ownerId: input.ownerId,
+      lastHeartbeatAt: input.lastHeartbeatAt,
+      leaseExpiresAt: input.leaseExpiresAt,
+    };
+    const updatedTask: Task = {
+      ...task,
+      ...withStatus("in_progress", at),
+      ...touchTimestamps(task, at),
+    };
+    this.leaseTokenHashes.set(run.id, input.leaseTokenHash);
     this.workerRuns.set(run.id, updatedRun);
     this.tasks.set(task.id, updatedTask);
-    return { ok: true, applied: true, task: updatedTask, workerRun: updatedRun };
+    return { ok: true, task: updatedTask, workerRun: updatedRun };
+  }
+
+  heartbeatWorkerRun(input: HeartbeatWorkerRunInput): HeartbeatWorkerRunResult {
+    const run = this.workerRuns.get(input.workerRunId);
+    if (run === undefined) {
+      return { ok: false, reason: "not_found" };
+    }
+    if (run.status !== "running") {
+      return { ok: false, reason: "illegal_transition" };
+    }
+    const storedHash = this.leaseTokenHashes.get(run.id);
+    if (storedHash === undefined || !timingSafeEqual(storedHash, input.leaseTokenHash)) {
+      return { ok: false, reason: "unauthorized" };
+    }
+    if (isLeaseExpired(run.leaseExpiresAt, input.now)) {
+      return { ok: false, reason: "expired" };
+    }
+    const updated: WorkerRun = {
+      ...run,
+      lastHeartbeatAt: input.lastHeartbeatAt,
+      leaseExpiresAt: input.leaseExpiresAt,
+      ...touchTimestamps(run, input.lastHeartbeatAt),
+    };
+    this.workerRuns.set(run.id, updated);
+    return { ok: true, workerRun: updated };
+  }
+
+  verifyWorkerRunLease(
+    workerRunId: EntityId,
+    leaseTokenHash: string,
+    now: string,
+  ): VerifyWorkerRunLeaseResult {
+    const run = this.workerRuns.get(workerRunId);
+    if (run === undefined) {
+      return { ok: false, reason: "not_found" };
+    }
+    if (run.status !== "running") {
+      return { ok: false, reason: "illegal_transition" };
+    }
+    const storedHash = this.leaseTokenHashes.get(workerRunId);
+    if (storedHash === undefined || !timingSafeEqual(storedHash, leaseTokenHash)) {
+      return { ok: false, reason: "unauthorized" };
+    }
+    if (isLeaseExpired(run.leaseExpiresAt, now)) {
+      return { ok: false, reason: "expired" };
+    }
+    return { ok: true };
+  }
+
+  listExpiredRunningWorkerRuns(projectId: EntityId, now: string): readonly WorkerRun[] {
+    return [...this.workerRuns.values()]
+      .filter(
+        (run) =>
+          run.projectId === projectId &&
+          run.status === "running" &&
+          isLeaseExpired(run.leaseExpiresAt, now),
+      )
+      .sort(compareWorkerRuns);
+  }
+
+  requeueTimedOutWorkerRun(input: RequeueTimedOutWorkerRunInput): TaskWorkerAssignment | undefined {
+    const previous = this.workerRuns.get(input.previousWorkerRunId);
+    if (previous === undefined || previous.projectId !== input.projectId) {
+      return undefined;
+    }
+    if (previous.status !== "timed_out" || previous.taskId === undefined) {
+      return undefined;
+    }
+    const task = this.tasks.get(previous.taskId);
+    if (task === undefined || task.projectId !== input.projectId) {
+      return undefined;
+    }
+    if (task.assignedWorkerRunId !== previous.id || task.status !== "failed") {
+      return undefined;
+    }
+    const active = [...this.workerRuns.values()].some(
+      (run) => run.taskId === task.id && isNonterminalWorkerRunStatus(run.status),
+    );
+    if (active || this.workerRuns.has(input.newWorkerRunId)) {
+      return undefined;
+    }
+
+    const at = input.at ?? nowIso();
+    const workerRun: WorkerRun = {
+      id: input.newWorkerRunId,
+      projectId: input.projectId,
+      taskId: task.id,
+      workerKind: previous.workerKind,
+      iteration: previous.iteration + 1,
+      ...createTimestamps(at),
+      ...withStatus("queued", at),
+    };
+    const updatedTask: Task = {
+      ...task,
+      assignedWorkerRunId: workerRun.id,
+      ...withStatus("assigned", at),
+      ...touchTimestamps(task, at),
+    };
+    this.workerRuns.set(workerRun.id, workerRun);
+    this.tasks.set(task.id, updatedTask);
+    return { task: updatedTask, workerRun, created: true };
   }
 
   updateWorkerRunStatus(

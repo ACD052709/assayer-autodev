@@ -46,6 +46,7 @@ import {
 } from "./security/index.js";
 import {
   assertEntityId,
+  assertLeaseToken,
   assertNonEmptyString,
   assertObject,
   rejectUnknownKeys,
@@ -194,6 +195,12 @@ function mapLifecycleError(error: WorkerRunLifecycleError): ApiError {
   }
   if (error.code === "validation") {
     return new ApiError(400, "validation_error", error.message);
+  }
+  if (error.code === "unauthorized") {
+    return new ApiError(403, "forbidden", error.message);
+  }
+  if (error.code === "expired") {
+    return new ApiError(409, "conflict", error.message);
   }
   if (error.code === "inconsistent") {
     return new ApiError(409, "conflict", error.message);
@@ -883,15 +890,39 @@ async function handlePostWorkerRunClaim(
 ): Promise<Response> {
   const workerRunId = assertEntityId(params.workerRunId, "workerRunId");
   const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
-  rejectUnknownKeys(body, []);
+  rejectUnknownKeys(body, ["ownerId"]);
   try {
-    const result = await lifecycleFor(deps).claim(workerRunId);
+    const result = await lifecycleFor(deps).claim(workerRunId, {
+      ownerId: assertEntityId(body.ownerId, "ownerId"),
+    });
     return jsonResponse({
       workerRun: result.workerRun,
       task: result.task,
       event: result.event,
       claimed: result.claimed,
+      leaseToken: result.leaseToken,
     });
+  } catch (error) {
+    if (error instanceof WorkerRunLifecycleError) {
+      throw mapLifecycleError(error);
+    }
+    throw error;
+  }
+}
+
+async function handlePostWorkerRunHeartbeat(
+  params: Record<string, string>,
+  request: Request,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const workerRunId = assertEntityId(params.workerRunId, "workerRunId");
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, ["leaseToken"]);
+  try {
+    const result = await lifecycleFor(deps).heartbeat(workerRunId, {
+      leaseToken: assertLeaseToken(body.leaseToken),
+    });
+    return jsonResponse({ workerRun: result.workerRun });
   } catch (error) {
     if (error instanceof WorkerRunLifecycleError) {
       throw mapLifecycleError(error);
@@ -907,11 +938,12 @@ async function handlePostWorkerRunSucceed(
 ): Promise<Response> {
   const workerRunId = assertEntityId(params.workerRunId, "workerRunId");
   const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
-  rejectUnknownKeys(body, ["summary", "structuredOutcome"]);
+  rejectUnknownKeys(body, ["summary", "structuredOutcome", "leaseToken"]);
   const structuredOutcome = assertStructuredOutcome(body.structuredOutcome, "structuredOutcome");
   try {
     const result = await lifecycleFor(deps).succeed(workerRunId, {
       summary: assertNonEmptyString(body.summary, "summary"),
+      leaseToken: assertLeaseToken(body.leaseToken),
       ...(structuredOutcome !== undefined ? { structuredOutcome } : {}),
     });
     return jsonResponse({
@@ -937,11 +969,12 @@ async function handlePostWorkerRunFail(
 ): Promise<Response> {
   const workerRunId = assertEntityId(params.workerRunId, "workerRunId");
   const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
-  rejectUnknownKeys(body, ["errorCode", "summary"]);
+  rejectUnknownKeys(body, ["errorCode", "summary", "leaseToken"]);
   try {
     const result = await lifecycleFor(deps).fail(workerRunId, {
       errorCode: assertNonEmptyString(body.errorCode, "errorCode"),
       summary: assertNonEmptyString(body.summary, "summary"),
+      leaseToken: assertLeaseToken(body.leaseToken),
     });
     return jsonResponse({
       workerRun: result.workerRun,
@@ -966,16 +999,61 @@ async function handlePostWorkerRunCancel(
 ): Promise<Response> {
   const workerRunId = assertEntityId(params.workerRunId, "workerRunId");
   const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
-  rejectUnknownKeys(body, ["reason"]);
+  rejectUnknownKeys(body, ["reason", "leaseToken"]);
   try {
     const result = await lifecycleFor(deps).cancel(workerRunId, {
       reason: assertNonEmptyString(body.reason, "reason"),
+      ...(body.leaseToken !== undefined ? { leaseToken: assertLeaseToken(body.leaseToken) } : {}),
     });
     return jsonResponse({
       workerRun: result.workerRun,
       task: result.task,
       event: result.event,
       applied: result.applied,
+    });
+  } catch (error) {
+    if (error instanceof WorkerRunLifecycleError) {
+      throw mapLifecycleError(error);
+    }
+    throw error;
+  }
+}
+
+async function handlePostRecoverExpiredRuns(
+  params: Record<string, string>,
+  request: Request,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const projectId = assertEntityId(params.projectId, "projectId");
+  await requireProject(deps.store, projectId);
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, []);
+  try {
+    const result = await lifecycleFor(deps).recoverExpiredRuns(projectId);
+    return jsonResponse({ recovered: result.recovered });
+  } catch (error) {
+    if (error instanceof WorkerRunLifecycleError) {
+      throw mapLifecycleError(error);
+    }
+    throw error;
+  }
+}
+
+async function handlePostWorkerRunRetry(
+  params: Record<string, string>,
+  request: Request,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const workerRunId = assertEntityId(params.workerRunId, "workerRunId");
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, []);
+  try {
+    const result = await lifecycleFor(deps).retry(workerRunId);
+    return jsonResponse({
+      previousWorkerRun: result.previousWorkerRun,
+      workerRun: result.workerRun,
+      task: result.task,
+      event: result.event,
     });
   } catch (error) {
     if (error instanceof WorkerRunLifecycleError) {
@@ -1137,6 +1215,12 @@ const routes: readonly {
     handler: (request, params, deps) => handlePostProjectDispatch(request, params, deps),
   },
   {
+    method: "POST",
+    pattern: "/api/projects/:projectId/recover-expired-runs",
+    policy: MASTER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostRecoverExpiredRuns(params, request, deps),
+  },
+  {
     method: "GET",
     pattern: "/api/projects/:projectId/worker-runs",
     policy: READ_POLICY,
@@ -1156,6 +1240,12 @@ const routes: readonly {
   },
   {
     method: "POST",
+    pattern: "/api/worker-runs/:workerRunId/heartbeat",
+    policy: WORKER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostWorkerRunHeartbeat(params, request, deps),
+  },
+  {
+    method: "POST",
     pattern: "/api/worker-runs/:workerRunId/succeed",
     policy: WORKER_WRITE_POLICY,
     handler: (request, params, deps) => handlePostWorkerRunSucceed(params, request, deps),
@@ -1171,6 +1261,12 @@ const routes: readonly {
     pattern: "/api/worker-runs/:workerRunId/cancel",
     policy: WORKER_WRITE_POLICY,
     handler: (request, params, deps) => handlePostWorkerRunCancel(params, request, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/worker-runs/:workerRunId/retry",
+    policy: MASTER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostWorkerRunRetry(params, request, deps),
   },
 ];
 

@@ -73,27 +73,40 @@ describe("Worker-run lifecycle API", () => {
 
   it("claims, succeeds, and rejects unknown fields", async () => {
     const runId = await dispatchedRunId();
-    const claim = await request(router, "POST", `/api/worker-runs/${runId}/claim`, {});
+    const claim = await request(router, "POST", `/api/worker-runs/${runId}/claim`, {
+      ownerId: "owner-api",
+    });
     expect(claim.status).toBe(200);
     const claimed = (await claim.json()) as {
       claimed: boolean;
-      workerRun: { status: string };
+      leaseToken: string;
+      workerRun: { status: string; ownerId: string };
       task: { status: string };
       event: { payload: { lifecycle: string } };
     };
     expect(claimed.claimed).toBe(true);
+    expect(claimed.leaseToken.length).toBeGreaterThanOrEqual(32);
     expect(claimed.workerRun.status).toBe("running");
+    expect(claimed.workerRun.ownerId).toBe("owner-api");
     expect(claimed.task.status).toBe("in_progress");
     expect(claimed.event.payload.lifecycle).toBe(LIFECYCLE_EVENTS.STARTED);
 
+    const listed = await request(router, "GET", `/api/worker-runs/${runId}`);
+    const listedBody = (await listed.json()) as { workerRun: Record<string, unknown> };
+    expect(listedBody.workerRun).not.toHaveProperty("leaseToken");
+    expect(listedBody.workerRun).not.toHaveProperty("leaseTokenHash");
+    expect(JSON.stringify(listedBody)).not.toContain(claimed.leaseToken);
+
     const unknown = await request(router, "POST", `/api/worker-runs/${runId}/succeed`, {
       summary: "ok",
+      leaseToken: claimed.leaseToken,
       executor: "cursor",
     });
     expect(unknown.status).toBe(400);
 
     const succeed = await request(router, "POST", `/api/worker-runs/${runId}/succeed`, {
       summary: "Finished the slice",
+      leaseToken: claimed.leaseToken,
       structuredOutcome: { testsPassed: 3 },
     });
     expect(succeed.status).toBe(200);
@@ -111,10 +124,14 @@ describe("Worker-run lifecycle API", () => {
 
   it("fails a claimed run via the fail route", async () => {
     const runId = await dispatchedRunId();
-    await request(router, "POST", `/api/worker-runs/${runId}/claim`, {});
+    const claim = await request(router, "POST", `/api/worker-runs/${runId}/claim`, {
+      ownerId: "owner-api",
+    });
+    const claimed = (await claim.json()) as { leaseToken: string };
     const fail = await request(router, "POST", `/api/worker-runs/${runId}/fail`, {
       errorCode: "TIMEOUT",
       summary: "Worker timed out",
+      leaseToken: claimed.leaseToken,
     });
     expect(fail.status).toBe(200);
     const body = (await fail.json()) as {

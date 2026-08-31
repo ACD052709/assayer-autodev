@@ -88,6 +88,15 @@ export function assertNonEmptyString(value: unknown, field: string): string {
   return value;
 }
 
+export function assertLeaseToken(value: unknown, field = "leaseToken"): string {
+  if (typeof value !== "string" || value.length < 32 || value.length > 256) {
+    throw new ApiError(400, "validation_error", `Invalid ${field}`, [
+      { field, message: "Required opaque token" },
+    ]);
+  }
+  return value;
+}
+
 export function assertEnum<T extends string>(value: unknown, field: string, allowed: ReadonlySet<T>): T {
   if (typeof value !== "string" || !allowed.has(value as T)) {
     throw new ApiError(400, "validation_error", `Invalid ${field}`, [

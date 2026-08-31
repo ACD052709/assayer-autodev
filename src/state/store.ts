@@ -24,6 +24,12 @@ import type {
   CreateVerifierRunInput,
   AssignTaskToWorkerRunInput,
   ApplyWorkerRunTaskTransitionInput,
+  ClaimQueuedWorkerRunInput,
+  ClaimQueuedWorkerRunResult,
+  HeartbeatWorkerRunInput,
+  HeartbeatWorkerRunResult,
+  RequeueTimedOutWorkerRunInput,
+  VerifyWorkerRunLeaseResult,
   CreateWorkerEventInput,
   CreateWorkerReportInput,
   CreateWorkerRunInput,
@@ -100,6 +106,15 @@ export interface StateStore {
   applyWorkerRunTaskTransition(
     input: ApplyWorkerRunTaskTransitionInput,
   ): WorkerRunTaskTransitionResult;
+  claimQueuedWorkerRun(input: ClaimQueuedWorkerRunInput): ClaimQueuedWorkerRunResult;
+  heartbeatWorkerRun(input: HeartbeatWorkerRunInput): HeartbeatWorkerRunResult;
+  verifyWorkerRunLease(
+    workerRunId: EntityId,
+    leaseTokenHash: string,
+    now: string,
+  ): VerifyWorkerRunLeaseResult;
+  listExpiredRunningWorkerRuns(projectId: EntityId, now: string): readonly WorkerRun[];
+  requeueTimedOutWorkerRun(input: RequeueTimedOutWorkerRunInput): TaskWorkerAssignment | undefined;
   updateWorkerRunStatus(
     workerRunId: EntityId,
     status: WorkerRun["status"],
