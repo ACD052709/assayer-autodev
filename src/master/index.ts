@@ -10,11 +10,25 @@ export { evaluateFinishedGate } from "./release-gate.js";
 export type { FinishedGateResult } from "./release-gate.js";
 export {
   authorizeLlmBudget,
-  computeTokenCostUsd,
-  DEFAULT_MASTER_MODEL_PRICING,
+  DEFAULT_MASTER_CALL_TOKEN_ESTIMATE,
   estimateMasterCallTokens,
 } from "./budget.js";
-export type { BudgetAuthorization, MasterModelPricing } from "./budget.js";
+export type { BudgetAuthorization, MasterCallTokenEstimate } from "./budget.js";
+export {
+  computeModelCostUsd,
+  createModelPricingCatalog,
+  DEFAULT_MODEL_PRICING_CATALOG,
+  estimateModelCost,
+  GPT_5_6_SOL_PRICES,
+  lookupModelPrices,
+} from "./pricing.js";
+export type {
+  ModelCostEstimate,
+  ModelPricingCatalog,
+  ModelTokenPrices,
+  ModelTokenUsage,
+} from "./pricing.js";
+export { nextActiveTaskIds } from "./active-tasks.js";
 export { validateMasterDecision, MasterOutputValidationError } from "./validate-output.js";
 export { MasterModelConfigError, MasterModelRequestError, redactSecrets } from "./errors.js";
 export { createRandomIdFactory, createSequentialIdFactory } from "./ids.js";

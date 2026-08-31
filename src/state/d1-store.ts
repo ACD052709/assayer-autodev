@@ -743,6 +743,12 @@ function rowToMasterRun(row: MasterRunRow): MasterRun {
   const inputTokens = optionalNumber(row.input_tokens);
   const outputTokens = optionalNumber(row.output_tokens);
   const estimatedCost = optionalNumber(row.estimated_cost);
+  const costStatus: MasterRun["costStatus"] =
+    estimatedCost !== undefined
+      ? "available"
+      : inputTokens !== undefined || outputTokens !== undefined
+        ? "unavailable"
+        : undefined;
   return {
     id: row.id,
     projectId: row.project_id,
@@ -762,6 +768,7 @@ function rowToMasterRun(row: MasterRunRow): MasterRun {
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
     ...(estimatedCost !== undefined ? { estimatedCost } : {}),
+    ...(costStatus !== undefined ? { costStatus } : {}),
   };
 }
 
@@ -1689,6 +1696,23 @@ export class D1StateStore implements AsyncStateStore {
     return updated;
   }
 
+  async setMasterActiveTaskIds(
+    projectId: EntityId,
+    activeTaskIds: readonly EntityId[],
+  ): Promise<MasterState> {
+    const state = await this.getOrCreateMasterState(projectId);
+    const updated: MasterState = {
+      ...state,
+      activeTaskIds: [...activeTaskIds],
+      ...touchTimestamps(state),
+    };
+    await this.db
+      .prepare(`UPDATE master_state SET active_task_ids = ?, updated_at = ? WHERE project_id = ?`)
+      .bind(toJson(updated.activeTaskIds), updated.updatedAt, projectId)
+      .run();
+    return updated;
+  }
+
   async enqueueMasterInboxItem(input: CreateMasterInboxItemInput): Promise<MasterInboxItem> {
     const item: MasterInboxItem = {
       id: input.id,
@@ -2120,6 +2144,13 @@ export class D1StateStore implements AsyncStateStore {
       ...(input.inputTokens !== undefined ? { inputTokens: input.inputTokens } : {}),
       ...(input.outputTokens !== undefined ? { outputTokens: input.outputTokens } : {}),
       ...(input.estimatedCost !== undefined ? { estimatedCost: input.estimatedCost } : {}),
+      ...(input.costStatus !== undefined
+        ? { costStatus: input.costStatus }
+        : input.estimatedCost !== undefined
+          ? { costStatus: "available" as const }
+          : input.inputTokens !== undefined || input.outputTokens !== undefined
+            ? { costStatus: "unavailable" as const }
+            : {}),
       ...createTimestamps(),
       ...withStatus(input.status),
     };

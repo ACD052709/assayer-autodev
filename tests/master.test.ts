@@ -98,6 +98,7 @@ describe("MasterOrchestrator", () => {
     expect(run.enforcedAction).toBe("CREATE_TASKS");
     expect(run.createdTaskIds).toHaveLength(1);
     expect(sync.listTasksByProject(PROJECT_ID)).toHaveLength(1);
+    expect(sync.getOrCreateMasterState(PROJECT_ID).activeTaskIds).toEqual(run.createdTaskIds);
     expect(sync.listMasterRunsByProject(PROJECT_ID)).toHaveLength(1);
     expect(sync.listMasterInbox(PROJECT_ID).some((item) => item.kind === "master_decision")).toBe(true);
     expect(client.calls).toHaveLength(1);
@@ -145,6 +146,8 @@ describe("MasterOrchestrator", () => {
 
     const run = await orchestrator.run({ projectId: PROJECT_ID });
     expect(run.createdTaskIds).toHaveLength(3);
+    expect(sync.getOrCreateMasterState(PROJECT_ID).activeTaskIds).toEqual(run.createdTaskIds);
+    expect(new Set(sync.getOrCreateMasterState(PROJECT_ID).activeTaskIds).size).toBe(3);
     const tasks = sync.listTasksByProject(PROJECT_ID);
     const byTitle = new Map(tasks.map((t) => [t.title, t]));
     const taskC = byTitle.get("Task C");
@@ -345,6 +348,120 @@ describe("MasterOrchestrator", () => {
     expect(run.finishedBlockedReasons).toEqual([]);
     expect(sync.getOrCreateMasterState(PROJECT_ID).status).toBe("completed");
   });
+
+  it("preserves existing active tasks and excludes terminal ones without duplicating IDs", async () => {
+    const sync = createInMemoryStateStore();
+    await seedProject(sync);
+    sync.createTask({
+      id: "task-keep",
+      projectId: PROJECT_ID,
+      title: "Keep",
+      description: "Still active",
+      kind: "implementation",
+    });
+    sync.createTask({
+      id: "task-done",
+      projectId: PROJECT_ID,
+      title: "Done",
+      description: "Already finished",
+      kind: "implementation",
+    });
+    sync.updateTaskStatus("task-done", "completed");
+    sync.setMasterActiveTaskIds(PROJECT_ID, ["task-keep", "task-done", "task-keep"]);
+    const orchestrator = createMasterOrchestrator({
+      store: asAsyncStore(sync),
+      client: new FakeMasterModelClient(async () => ({
+        output: validDecision(),
+        model: "fake-master",
+      })),
+      idFactory: createSequentialIdFactory(),
+    });
+    const run = await orchestrator.run({ projectId: PROJECT_ID });
+    expect(run.createdTaskIds).toEqual(["task-1"]);
+    expect(sync.getOrCreateMasterState(PROJECT_ID).activeTaskIds).toEqual(["task-keep", "task-1"]);
+  });
+
+  it("does not change activeTaskIds when the model request fails", async () => {
+    const sync = createInMemoryStateStore();
+    await seedProject(sync);
+    sync.createTask({
+      id: "task-keep",
+      projectId: PROJECT_ID,
+      title: "Keep",
+      description: "Still active",
+      kind: "planning",
+    });
+    sync.setMasterActiveTaskIds(PROJECT_ID, ["task-keep"]);
+    const orchestrator = createMasterOrchestrator({
+      store: asAsyncStore(sync),
+      client: new FakeMasterModelClient(async () => {
+        throw new Error("upstream unavailable");
+      }),
+    });
+    const run = await orchestrator.run({ projectId: PROJECT_ID });
+    expect(run.status).toBe("failed");
+    expect(run.enforcedAction).toBe("BLOCKED");
+    expect(sync.getOrCreateMasterState(PROJECT_ID).activeTaskIds).toEqual(["task-keep"]);
+    expect(sync.listTasksByProject(PROJECT_ID)).toHaveLength(1);
+  });
+
+  it("records Sol dollar cost without changing token ledger math", async () => {
+    const sync = createInMemoryStateStore();
+    await seedProject(sync);
+    const orchestrator = createMasterOrchestrator({
+      store: asAsyncStore(sync),
+      client: new FakeMasterModelClient(async () => ({
+        output: validDecision(),
+        model: "gpt-5.6-sol",
+        inputTokens: 1036,
+        outputTokens: 178,
+      })),
+      idFactory: createSequentialIdFactory(),
+    });
+    const run = await orchestrator.run({ projectId: PROJECT_ID });
+    expect(run.costStatus).toBe("available");
+    expect(run.estimatedCost).toBeCloseTo(0.007704, 10);
+    const ledger = sync.getBudgetLedger(PROJECT_ID)!;
+    expect(ledger.entries).toHaveLength(1);
+    expect(ledger.entries[0]?.amount).toBe(1214);
+  });
+
+  it("marks cost unavailable instead of $0 for an unknown model", async () => {
+    const sync = createInMemoryStateStore();
+    await seedProject(sync);
+    const orchestrator = createMasterOrchestrator({
+      store: asAsyncStore(sync),
+      client: new FakeMasterModelClient(async () => ({
+        output: validDecision(),
+        model: "mystery-model",
+        inputTokens: 1036,
+        outputTokens: 178,
+      })),
+    });
+    const run = await orchestrator.run({ projectId: PROJECT_ID });
+    expect(run.costStatus).toBe("unavailable");
+    expect(run.estimatedCost).toBeUndefined();
+    expect(sync.getBudgetLedger(PROJECT_ID)!.entries[0]?.amount).toBe(1214);
+  });
+
+  it("applies cached-input pricing while counting input+output tokens on the ledger", async () => {
+    const sync = createInMemoryStateStore();
+    await seedProject(sync);
+    const orchestrator = createMasterOrchestrator({
+      store: asAsyncStore(sync),
+      client: new FakeMasterModelClient(async () => ({
+        output: validDecision(),
+        model: "gpt-5.6-sol",
+        inputTokens: 1000,
+        outputTokens: 100,
+        cachedInputTokens: 400,
+      })),
+    });
+    const run = await orchestrator.run({ projectId: PROJECT_ID });
+    expect(run.costStatus).toBe("available");
+    expect(run.estimatedCost).toBeCloseTo(0.00456, 10);
+    expect(sync.getBudgetLedger(PROJECT_ID)!.entries[0]?.amount).toBe(1100);
+  });
 });
 
 describe("evaluateFinishedGate", () => {
@@ -439,6 +556,27 @@ describe("OpenAIMasterModelClient", () => {
     expect(attempts).toBe(3);
     expect(result.inputTokens).toBe(11);
     expect(result.outputTokens).toBe(7);
+  });
+
+  it("reads cached input tokens from Responses usage when present", async () => {
+    const client = new OpenAIMasterModelClient({
+      apiKey: "sk-test-placeholder",
+      maxAttempts: 1,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            output_text: JSON.stringify(validDecision({ action: "WAIT_FOR_WORKERS", taskProposals: [] })),
+            usage: {
+              input_tokens: 1000,
+              output_tokens: 100,
+              input_tokens_details: { cached_tokens: 400 },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+    const result = await client.complete({ systemPrompt: "sys", userPayload: { ok: true } });
+    expect(result.cachedInputTokens).toBe(400);
   });
 });
 

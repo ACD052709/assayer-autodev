@@ -8,6 +8,7 @@ export interface MasterModelCallResult {
   readonly model: string;
   readonly inputTokens?: number;
   readonly outputTokens?: number;
+  readonly cachedInputTokens?: number;
 }
 
 export interface MasterModelClient {

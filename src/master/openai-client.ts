@@ -28,6 +28,10 @@ function defaultSleep(ms: number): Promise<void> {
 interface ResponsesUsage {
   readonly input_tokens?: number;
   readonly output_tokens?: number;
+  readonly cached_tokens?: number;
+  readonly input_tokens_details?: {
+    readonly cached_tokens?: number;
+  };
 }
 
 interface ResponsesBody {
@@ -173,11 +177,14 @@ export class OpenAIMasterModelClient implements MasterModelClient {
 
         const inputTokens = parsed.usage?.input_tokens;
         const outputTokens = parsed.usage?.output_tokens;
+        const cachedInputTokens =
+          parsed.usage?.input_tokens_details?.cached_tokens ?? parsed.usage?.cached_tokens;
         return {
           output,
           model: this.model,
           ...(inputTokens !== undefined ? { inputTokens } : {}),
           ...(outputTokens !== undefined ? { outputTokens } : {}),
+          ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
         };
       } catch (error) {
         lastError = error;

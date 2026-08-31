@@ -133,6 +133,8 @@ export interface MasterRun extends Timestamps, StatusRecord<MasterRunStatus> {
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly estimatedCost?: number;
+  /** Present when usage exists. "unavailable" means pricing could not be resolved — never a fake $0. */
+  readonly costStatus?: "available" | "unavailable";
 }
 
 export interface CreateReleaseContractInput {
@@ -183,6 +185,7 @@ export interface CreateMasterRunInput {
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly estimatedCost?: number;
+  readonly costStatus?: "available" | "unavailable";
   readonly status: MasterRunStatus;
 }
 

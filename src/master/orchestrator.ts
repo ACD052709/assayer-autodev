@@ -8,17 +8,22 @@ import type {
   TaskProposal,
 } from "../domain/index.js";
 import type { AsyncStateStore } from "../state/async-store.js";
+import { nextActiveTaskIds } from "./active-tasks.js";
 import {
   authorizeLlmBudget,
-  computeTokenCostUsd,
-  DEFAULT_MASTER_MODEL_PRICING,
+  DEFAULT_MASTER_CALL_TOKEN_ESTIMATE,
   estimateMasterCallTokens,
-  type MasterModelPricing,
+  type MasterCallTokenEstimate,
 } from "./budget.js";
 import type { MasterModelClient } from "./client.js";
 import { MasterModelConfigError, sanitizeErrorMessage } from "./errors.js";
 import type { IdFactory } from "./ids.js";
 import { createRandomIdFactory } from "./ids.js";
+import {
+  DEFAULT_MODEL_PRICING_CATALOG,
+  estimateModelCost,
+  type ModelPricingCatalog,
+} from "./pricing.js";
 import { MASTER_PROMPT_VERSION, MASTER_SYSTEM_PROMPT } from "./prompt.js";
 import { evaluateFinishedGate } from "./release-gate.js";
 import { topologicalTaskProposals, validateMasterDecision } from "./validate-output.js";
@@ -33,7 +38,8 @@ export interface MasterOrchestratorOptions {
   readonly store: AsyncStateStore;
   readonly client: MasterModelClient;
   readonly idFactory?: IdFactory;
-  readonly pricing?: MasterModelPricing;
+  readonly tokenEstimate?: MasterCallTokenEstimate;
+  readonly pricingCatalog?: ModelPricingCatalog;
 }
 
 function phaseForAction(action: MasterAction): MasterPhase {
@@ -59,18 +65,20 @@ export class MasterOrchestrator {
   private readonly store: AsyncStateStore;
   private readonly client: MasterModelClient;
   private readonly ids: IdFactory;
-  private readonly pricing: MasterModelPricing;
+  private readonly tokenEstimate: MasterCallTokenEstimate;
+  private readonly pricingCatalog: ModelPricingCatalog;
 
   constructor(options: MasterOrchestratorOptions) {
     this.store = options.store;
     this.client = options.client;
     this.ids = options.idFactory ?? createRandomIdFactory();
-    this.pricing = options.pricing ?? DEFAULT_MASTER_MODEL_PRICING;
+    this.tokenEstimate = options.tokenEstimate ?? DEFAULT_MASTER_CALL_TOKEN_ESTIMATE;
+    this.pricingCatalog = options.pricingCatalog ?? DEFAULT_MODEL_PRICING_CATALOG;
   }
 
   async run(request: MasterRunRequest): Promise<MasterRun> {
     const input = await this.loadInput(request);
-    const estimatedTokens = estimateMasterCallTokens(this.pricing);
+    const estimatedTokens = estimateMasterCallTokens(this.tokenEstimate);
     const authorization = authorizeLlmBudget(input.budget, estimatedTokens);
     if (!authorization.allowed) {
       return this.persistBlockedRun(
@@ -85,6 +93,7 @@ export class MasterOrchestrator {
     let modelId = "unknown";
     let inputTokens: number | undefined;
     let outputTokens: number | undefined;
+    let cachedInputTokens: number | undefined;
     try {
       const result = await this.client.complete({
         systemPrompt: MASTER_SYSTEM_PROMPT,
@@ -94,6 +103,7 @@ export class MasterOrchestrator {
       modelId = result.model;
       inputTokens = result.inputTokens;
       outputTokens = result.outputTokens;
+      cachedInputTokens = result.cachedInputTokens;
     } catch (error) {
       if (error instanceof MasterModelConfigError) {
         throw error;
@@ -120,7 +130,14 @@ export class MasterOrchestrator {
       decision = validateMasterDecision(modelOutput);
     } catch (error) {
       const message = error instanceof Error ? error.message : "model_output_invalid";
-      return this.persistRejectedRun(request, message, modelId, inputTokens, outputTokens);
+      return this.persistRejectedRun(
+        request,
+        message,
+        modelId,
+        inputTokens,
+        outputTokens,
+        cachedInputTokens,
+      );
     }
 
     const gate = evaluateFinishedGate(input);
@@ -141,14 +158,19 @@ export class MasterOrchestrator {
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : "task_proposal_invalid";
-        return this.persistRejectedRun(request, message, modelId, inputTokens, outputTokens);
+        return this.persistRejectedRun(
+          request,
+          message,
+          modelId,
+          inputTokens,
+          outputTokens,
+          cachedInputTokens,
+        );
       }
+      await this.syncActiveTaskIds(request.projectId, createdTaskIds);
     }
 
-    const estimatedCost =
-      inputTokens !== undefined || outputTokens !== undefined
-        ? computeTokenCostUsd(inputTokens ?? 0, outputTokens ?? 0, this.pricing)
-        : undefined;
+    const cost = this.costFields(modelId, inputTokens, outputTokens, cachedInputTokens);
 
     const run = await this.store.createMasterRun({
       id: this.ids.next("mrun"),
@@ -168,7 +190,7 @@ export class MasterOrchestrator {
       ...(request.context !== undefined ? { context: request.context } : {}),
       ...(inputTokens !== undefined ? { inputTokens } : {}),
       ...(outputTokens !== undefined ? { outputTokens } : {}),
-      ...(estimatedCost !== undefined ? { estimatedCost } : {}),
+      ...cost,
     });
 
     await this.store.updateMasterPhase(request.projectId, phaseForAction(enforcedAction));
@@ -308,6 +330,42 @@ export class MasterOrchestrator {
     return createdIds;
   }
 
+  private async syncActiveTaskIds(
+    projectId: EntityId,
+    newlyCreatedIds: readonly EntityId[],
+  ): Promise<void> {
+    const [state, tasks] = await Promise.all([
+      this.store.getOrCreateMasterState(projectId),
+      this.store.listTasksByProject(projectId),
+    ]);
+    const next = nextActiveTaskIds(state.activeTaskIds, tasks, newlyCreatedIds);
+    await this.store.setMasterActiveTaskIds(projectId, next);
+  }
+
+  private costFields(
+    model: string,
+    inputTokens?: number,
+    outputTokens?: number,
+    cachedInputTokens?: number,
+  ): Pick<CreateMasterRunInput, "estimatedCost" | "costStatus"> {
+    if (inputTokens === undefined && outputTokens === undefined) {
+      return {};
+    }
+    const estimate = estimateModelCost(
+      model,
+      {
+        inputTokens: inputTokens ?? 0,
+        outputTokens: outputTokens ?? 0,
+        ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+      },
+      this.pricingCatalog,
+    );
+    if (estimate.status === "unavailable") {
+      return { costStatus: "unavailable" };
+    }
+    return { costStatus: "available", estimatedCost: estimate.amount };
+  }
+
   private persistInputFields(request: MasterRunRequest): Pick<CreateMasterRunInput, "trigger" | "context"> {
     return {
       ...(request.trigger !== undefined ? { trigger: request.trigger } : {}),
@@ -345,6 +403,7 @@ export class MasterOrchestrator {
     model: string,
     inputTokens?: number,
     outputTokens?: number,
+    cachedInputTokens?: number,
   ): Promise<MasterRun> {
     const run = await this.store.createMasterRun({
       id: this.ids.next("mrun"),
@@ -360,6 +419,7 @@ export class MasterOrchestrator {
       ...this.persistInputFields(request),
       ...(inputTokens !== undefined ? { inputTokens } : {}),
       ...(outputTokens !== undefined ? { outputTokens } : {}),
+      ...this.costFields(model, inputTokens, outputTokens, cachedInputTokens),
     });
     await this.store.updateMasterPhase(request.projectId, "paused");
     await this.enqueueDecision(run);

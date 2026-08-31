@@ -130,6 +130,7 @@ export interface StateStore {
   // Master director
   getOrCreateMasterState(projectId: EntityId): MasterState;
   updateMasterPhase(projectId: EntityId, phase: MasterState["status"]): MasterState;
+  setMasterActiveTaskIds(projectId: EntityId, activeTaskIds: readonly EntityId[]): MasterState;
   enqueueMasterInboxItem(input: CreateMasterInboxItemInput): MasterInboxItem;
   listMasterInbox(projectId: EntityId): readonly MasterInboxItem[];
 

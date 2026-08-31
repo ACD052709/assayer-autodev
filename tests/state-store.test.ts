@@ -303,6 +303,10 @@ describe("InMemoryStateStore", () => {
     expect(updated.status).toBe("executing");
     expect(updated.lastDirectorActionAt).toBeTruthy();
 
+    store.setMasterActiveTaskIds(projectId, ["task-keep", "task-keep"]);
+    store.updateMasterPhase(projectId, "planning");
+    expect(store.getOrCreateMasterState(projectId).activeTaskIds).toEqual(["task-keep", "task-keep"]);
+
     const item = store.enqueueMasterInboxItem({
       id: "inbox-1",
       projectId,

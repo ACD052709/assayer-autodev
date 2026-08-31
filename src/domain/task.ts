@@ -12,6 +12,16 @@ export type TaskStatus =
   | "failed"
   | "cancelled";
 
+export const TERMINAL_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+export function isTerminalTaskStatus(status: TaskStatus): boolean {
+  return TERMINAL_TASK_STATUSES.has(status);
+}
+
 export type TaskKind =
   | "planning"
   | "implementation"

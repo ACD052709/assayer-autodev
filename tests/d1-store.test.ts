@@ -186,6 +186,12 @@ describe("D1StateStore", () => {
     expect(await store.listBlockersByProject(projectId)).toHaveLength(1);
     expect((await store.getMasterRun(run.id))?.enforcedAction).toBe("BLOCKED");
     expect(await store.listMasterRunsByProject(projectId)).toHaveLength(1);
+
+    await store.setMasterActiveTaskIds(projectId, ["task-keep"]);
+    await store.updateMasterPhase(projectId, "planning");
+    const master = await store.getOrCreateMasterState(projectId);
+    expect(master.activeTaskIds).toEqual(["task-keep"]);
+    expect(master.status).toBe("planning");
   });
 
   it("adds budget resources without a new schema and rejects duplicates", async () => {

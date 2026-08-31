@@ -556,6 +556,17 @@ export class InMemoryStateStore implements StateStore {
     return updated;
   }
 
+  setMasterActiveTaskIds(projectId: EntityId, activeTaskIds: readonly EntityId[]): MasterState {
+    const state = this.getOrCreateMasterState(projectId);
+    const updated: MasterState = {
+      ...state,
+      activeTaskIds: [...activeTaskIds],
+      ...touchTimestamps(state),
+    };
+    this.masterStates.set(projectId, updated);
+    return updated;
+  }
+
   enqueueMasterInboxItem(input: CreateMasterInboxItemInput): MasterInboxItem {
     this.getOrCreateMasterState(input.projectId);
     const item: MasterInboxItem = {
@@ -804,6 +815,7 @@ export class InMemoryStateStore implements StateStore {
       ...(input.inputTokens !== undefined ? { inputTokens: input.inputTokens } : {}),
       ...(input.outputTokens !== undefined ? { outputTokens: input.outputTokens } : {}),
       ...(input.estimatedCost !== undefined ? { estimatedCost: input.estimatedCost } : {}),
+      ...(input.costStatus !== undefined ? { costStatus: input.costStatus } : {}),
       ...createTimestamps(),
       ...withStatus(input.status),
     };

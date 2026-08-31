@@ -1,17 +1,12 @@
 import type { BudgetLedger } from "../domain/index.js";
 
-export interface MasterModelPricing {
-  readonly inputPerMillion: number;
-  readonly outputPerMillion: number;
-  readonly currency: string;
+/** Token-count estimate used only for hard llm_tokens authorization. Independent of dollar pricing. */
+export interface MasterCallTokenEstimate {
   readonly estimatedInputTokens: number;
   readonly estimatedOutputTokens: number;
 }
 
-export const DEFAULT_MASTER_MODEL_PRICING: MasterModelPricing = {
-  inputPerMillion: 0,
-  outputPerMillion: 0,
-  currency: "usd",
+export const DEFAULT_MASTER_CALL_TOKEN_ESTIMATE: MasterCallTokenEstimate = {
   estimatedInputTokens: 4000,
   estimatedOutputTokens: 1500,
 };
@@ -20,19 +15,10 @@ export type BudgetAuthorization =
   | { readonly allowed: true; readonly remaining: number; readonly estimatedTokens: number }
   | { readonly allowed: false; readonly reason: string; readonly estimatedTokens: number };
 
-export function estimateMasterCallTokens(pricing: MasterModelPricing): number {
-  return pricing.estimatedInputTokens + pricing.estimatedOutputTokens;
-}
-
-export function computeTokenCostUsd(
-  inputTokens: number,
-  outputTokens: number,
-  pricing: MasterModelPricing,
+export function estimateMasterCallTokens(
+  estimate: MasterCallTokenEstimate = DEFAULT_MASTER_CALL_TOKEN_ESTIMATE,
 ): number {
-  return (
-    (inputTokens / 1_000_000) * pricing.inputPerMillion +
-    (outputTokens / 1_000_000) * pricing.outputPerMillion
-  );
+  return estimate.estimatedInputTokens + estimate.estimatedOutputTokens;
 }
 
 export function authorizeLlmBudget(
