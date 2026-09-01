@@ -18,6 +18,7 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,6 +31,9 @@ jobs:
 
       - name: Install pinned dependencies
         run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
 
       - name: Run fail-closed validation gate
         run: npm run validate:local
