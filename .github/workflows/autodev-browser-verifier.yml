@@ -1,0 +1,80 @@
+name: AutoDev browser verifier
+
+on:
+  workflow_dispatch:
+    inputs:
+      verifierRunId:
+        description: Pending verifier run id
+        required: true
+        type: string
+      projectId:
+        description: Project id
+        required: true
+        type: string
+      taskId:
+        description: Original task under independent verification
+        required: true
+        type: string
+      testCaseId:
+        description: Registered deterministic browser test case id
+        required: true
+        type: string
+      workerRunId:
+        description: Original worker run used for verifier-attempt identity
+        required: true
+        type: string
+      codeCandidateId:
+        description: Exact code candidate whose bytes must be verified
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autodev-verifier-${{ github.event.inputs.verifierRunId }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AUTODEV_CONTROL_PLANE_URL: https://assayer-autodev-control-plane.gr8white911.workers.dev
+      AUTODEV_BROWSER_SETUP_COMMANDS_JSON: ${{ vars.AUTODEV_BROWSER_SETUP_COMMANDS_JSON }}
+      AUTODEV_BROWSER_SERVER_COMMAND_JSON: ${{ vars.AUTODEV_BROWSER_SERVER_COMMAND_JSON }}
+      AUTODEV_BROWSER_SERVER_PORT: ${{ vars.AUTODEV_BROWSER_SERVER_PORT }}
+    steps:
+      - name: Checkout assayer-autodev
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install pinned verifier dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Verify exact candidate independently
+        env:
+          AUTODEV_SERVICE_TOKEN: ${{ secrets.AUTODEV_SERVICE_TOKEN }}
+          AUTODEV_TARGET_REPO_TOKEN: ${{ secrets.AUTODEV_TARGET_REPO_READ_TOKEN }}
+          VERIFIER_RUN_ID: ${{ github.event.inputs.verifierRunId }}
+          PROJECT_ID: ${{ github.event.inputs.projectId }}
+          TASK_ID: ${{ github.event.inputs.taskId }}
+          TEST_CASE_ID: ${{ github.event.inputs.testCaseId }}
+          WORKER_RUN_ID: ${{ github.event.inputs.workerRunId }}
+          CODE_CANDIDATE_ID: ${{ github.event.inputs.codeCandidateId }}
+        run: >-
+          npm run orchestrated-verifier --
+          --verifier-run-id "$VERIFIER_RUN_ID"
+          --project-id "$PROJECT_ID"
+          --task-id "$TASK_ID"
+          --test-case-id "$TEST_CASE_ID"
+          --worker-run-id "$WORKER_RUN_ID"
+          --code-candidate-id "$CODE_CANDIDATE_ID"

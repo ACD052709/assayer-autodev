@@ -33,5 +33,7 @@ export interface WorkerTaskPacket {
   readonly targetRepository?: string;
   readonly targetRef?: string;
   readonly targetTestCommand?: string;
+  /** For repair tasks, exact prior candidate that must be reconstructed before editing. */
+  readonly parentCandidateId?: EntityId;
   readonly execution: WorkerTaskPacketExecution;
 }

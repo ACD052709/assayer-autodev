@@ -12,3 +12,6 @@ export * from "./verifier.js";
 export * from "./master.js";
 export * from "./master-ai.js";
 export * from "./budget.js";
+export * from "./audit-finding.js";
+export * from "./code-candidate.js";
+export * from "./promotion-target.js";

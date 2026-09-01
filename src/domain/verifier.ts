@@ -5,6 +5,8 @@ export type VerifierRunStatus = "pending" | "running" | "completed" | "failed";
 export interface VerifierRun extends Timestamps, StatusRecord<VerifierRunStatus>, Provenance {
   readonly id: EntityId;
   readonly taskId: EntityId;
+  /** Exact code candidate verified by this run. */
+  readonly codeCandidateId?: EntityId;
   readonly outcome?: VerificationOutcome;
   readonly startedAt?: ISOTimestamp;
   readonly completedAt?: ISOTimestamp;
@@ -16,6 +18,7 @@ export interface CreateVerifierRunInput {
   readonly id: EntityId;
   readonly projectId: EntityId;
   readonly taskId: EntityId;
+  readonly codeCandidateId?: EntityId;
 }
 
 export interface CompleteVerifierRunInput {

@@ -1,4 +1,5 @@
 import type { WorkerTaskPacket } from "../domain/worker-task-packet.js";
+import { parseRepairTaskContext, stripRepairTaskContext } from "../orchestrator/repair-context.js";
 
 const MAX_PROMPT_CHARS = 12_000;
 
@@ -33,6 +34,19 @@ export function buildCodingTaskPrompt(packet: WorkerTaskPacket): string {
     })),
   );
 
+  const repairContext = parseRepairTaskContext(packet.task.description);
+  const repairSection =
+    repairContext === undefined
+      ? []
+      : [
+          "Repair scope (fix only this verification failure):",
+          `- Original task: ${repairContext.originalTaskId}`,
+          `- Failed verifier run: ${repairContext.verifierRunId}`,
+          `- Repair attempt: ${repairContext.attempt}`,
+          `- Failure evidence: ${repairContext.failureSummary}`,
+          "- Do not expand scope beyond the reported failure.",
+        ];
+
   const prompt = [
     "You are an unattended coding worker executing a bounded Master task.",
     "Authority limits:",
@@ -40,24 +54,26 @@ export function buildCodingTaskPrompt(packet: WorkerTaskPacket): string {
     "- Do not push, merge, deploy, or run production actions.",
     "- Do not modify assayer-autodev or any secrets.",
     "- Do not decide final task acceptance; tests and Master verification happen later.",
-  "",
+    "",
     `Task ID: ${packet.taskId}`,
     `Worker run ID: ${packet.workerRunId}`,
     `Objective: ${packet.task.title}`,
-    `Description: ${packet.task.description}`,
-  "",
+    `Description: ${stripRepairTaskContext(packet.task.description)}`,
+    "",
+    ...repairSection,
+    ...(repairSection.length > 0 ? [""] : []),
     "Approved requirements:",
     requirements,
-  "",
+    "",
     "Acceptance criteria:",
     acceptance,
-  "",
+    "",
     "Open relevant blockers:",
     blockers,
-  "",
+    "",
     "Do-not-modify constraints:",
     constraints,
-  "",
+    "",
     "Complete only the bounded implementation work needed for this task inside the checkout.",
   ].join("\n");
 

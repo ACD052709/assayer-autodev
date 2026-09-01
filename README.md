@@ -2,7 +2,9 @@
 
 Autonomous development and verification orchestration system for Assayer.
 
-This repository contains a **TypeScript orchestration foundation** with typed domain models, an in-memory state store for local tests, a **Cloudflare Worker control plane** (D1 + R2), and a **Master AI director** that proposes the next orchestration step via the OpenAI Responses API. External implementation actuators (Cursor ACP, Playwright, GitHub, Assayer product) are intentionally **not connected yet**.
+This repository contains the Assayer AutoDev orchestration system: a **Cloudflare Worker control plane** (D1 + R2), a **Master AI director**, leased GitHub Actions implementation workers, independent Playwright browser verification, bounded repair orchestration, an observe-only auditor/watchdog, and controlled post-verification candidate promotion.
+
+The hardened source is intended to fail closed when candidate provenance, exact-candidate verification, repair lineage, or promotion safety cannot be established. Real Assayer targets remain disabled until disposable end-to-end validation is complete.
 
 ## Architecture
 
@@ -10,8 +12,8 @@ This repository contains a **TypeScript orchestration foundation** with typed do
 flowchart TB
   subgraph clients [Clients]
     MA[Master AI Director]
-    WK[Task Workers - not connected]
-    VF[Verifier - not connected]
+    WK[Task Workers]
+    VF[Independent Verifier]
     DB[Dashboard]
   end
 
@@ -48,7 +50,7 @@ flowchart TB
 
 The Master reads **authoritative D1 structured state** (project, requirements, definition of done, tasks, verifier results, tests, evidence, budget, blockers, inbox) plus a stored project objective. It returns a structured **proposal**: create tasks, wait, request verification, request human approval, replan, attempt final acceptance, finish, or block.
 
-The Master **does not edit code**. Workers would implement tasks later. Model output is never treated as truth: the orchestrator validates JSON, then applies **code-level safety rules**, including a deterministic **FINISHED gate**.
+The Master **does not edit code**. Leased implementation workers produce isolated code candidates; independent verification and controlled promotion remain separate responsibilities. Model output is never treated as truth: the orchestrator validates JSON, then applies **code-level safety rules**, including a deterministic **FINISHED gate**.
 
 D1 state is authoritative. Prior chat text and worker narrative are not.
 
@@ -108,7 +110,8 @@ src/
     └── index.ts      # Cloudflare Worker entry
 migrations/
 ├── 0001_initial.sql
-└── 0002_master_ai.sql
+├── ...
+└── 0008_candidate_lineage_verification.sql
 wrangler.toml         # Worker config (real D1/R2 bindings; no secrets in repo)
 ```
 
@@ -123,7 +126,7 @@ Dedicated **assayer-autodev** infrastructure has been provisioned in Cloudflare 
 
 `wrangler.toml` references these real bindings. **No secret values, API tokens, or credentials are stored in this repository.**
 
-**Not yet done:** remote D1 migration for `0002_master_ai.sql`, Worker deployment, and setting `OPENAI_API_KEY` in Cloudflare.
+Deployment state is environment-specific. Before a hardened deployment, run `npm run validate:local`, confirm the dedicated AutoDev D1 database is migrated through the required version, and verify runtime secrets/configuration without placing secret values in source. See `PRE_DEPLOY_CHECKLIST.md`.
 
 Protected routes fail closed (`503 auth_misconfigured`) if `AUTODEV_SERVICE_TOKEN` is missing at runtime. Live Master runs fail closed if `OPENAI_API_KEY` is missing (`503 master_misconfigured` / real client constructor error).
 
@@ -201,7 +204,7 @@ This API is **private machine-to-machine infrastructure**. It is not a browser-f
 
 **Do not deploy to Cloudflare without setting `AUTODEV_SERVICE_TOKEN`.** This is required for the first private deployment.
 
-**Do not make a live Master call without setting `OPENAI_API_KEY`.** Apply remote migration `0002_master_ai.sql` first.
+**Do not make a live Master call without setting `OPENAI_API_KEY`.** Before hardened runtime use, bring the dedicated AutoDev D1 database to the migration level required by this checkout (currently through `0008_candidate_lineage_verification.sql`).
 
 ### Setting secrets (when deploying)
 
@@ -215,6 +218,15 @@ Do not paste secret values into any file tracked by git.
 ## Local development
 
 **Requirements:** Node.js 20+
+
+Run the complete fail-closed local validation gate with:
+
+```bash
+npm ci
+npm run validate:local
+```
+
+The repository also includes `.github/workflows/validate.yml`, which runs the same gate on pushes to `main`, pull requests, and manual dispatch. It requires no application secrets.
 
 ```bash
 npm install

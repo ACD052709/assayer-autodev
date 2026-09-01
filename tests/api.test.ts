@@ -68,6 +68,33 @@ describe("API router", () => {
     expect(body.masterState.status).toBe("initializing");
   });
 
+  it("configures target and promotion policy for an existing project", async () => {
+    await request(router, "POST", "/api/projects", {
+      id: "proj-target",
+      name: "Target",
+      description: "Target config",
+    });
+
+    const configured = await request(router, "POST", "/api/projects/proj-target/target-config", {
+      targetRepository: "owner/repo",
+      targetRef: "smoke",
+      targetTestCommand: "node --test",
+      promotionRepository: "owner/repo",
+      promotionRefPrefix: "autodev",
+      doNotModifyConstraints: ["Do not touch production"],
+    });
+    expect(configured.status).toBe(200);
+    const body = (await configured.json()) as { project: { promotionRepository?: string; promotionRefPrefix?: string } };
+    expect(body.project.promotionRepository).toBe("owner/repo");
+    expect(body.project.promotionRefPrefix).toBe("autodev");
+
+    const rejected = await request(router, "POST", "/api/projects/proj-target/target-config", {
+      targetRepository: "owner/repo",
+      promotionRepository: "other/repo",
+    });
+    expect(rejected.status).toBe(400);
+  });
+
   it("persists requirements and tasks", async () => {
     await request(router, "POST", "/api/projects", {
       id: "proj-rt",

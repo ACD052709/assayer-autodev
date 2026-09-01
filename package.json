@@ -10,7 +10,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "worker:validate": "wrangler deploy --dry-run --outdir dist/worker",
-    "actuator": "tsx src/cli/run-worker.ts"
+    "actuator": "tsx src/cli/run-worker.ts",
+    "browser-verifier": "tsx src/cli/run-browser-verifier.ts",
+    "orchestrated-verifier": "tsx src/cli/run-orchestrated-verifier.ts",
+    "orchestrated-promotion": "tsx src/cli/run-orchestrated-promotion.ts",
+    "validate:local": "npm run typecheck && npm run typecheck:worker && npm test && npm run worker:validate"
   },
   "engines": {
     "node": ">=20"
@@ -18,6 +22,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260830.1",
     "@types/node": "^22.10.0",
+    "playwright": "^1.55.0",
     "sql.js": "^1.12.0",
     "tsx": "^4.23.13",
     "typescript": "^5.7.2",

@@ -1,0 +1,105 @@
+name: AutoDev verified candidate promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      promotionRunId:
+        description: Promotion run id
+        required: true
+        type: string
+      projectId:
+        description: Project id
+        required: true
+        type: string
+      codeCandidateId:
+        description: Accepted code candidate id
+        required: true
+        type: string
+      taskId:
+        description: Accepted task id
+        required: true
+        type: string
+      workerRunId:
+        description: Worker run that produced the candidate
+        required: true
+        type: string
+      verifierRunId:
+        description: Independent PASS verifier run id
+        required: true
+        type: string
+      destinationRepository:
+        description: Explicit allowed owner/repo destination
+        required: true
+        type: string
+      destinationRef:
+        description: Dedicated AutoDev task branch
+        required: true
+        type: string
+      baseCommitSha:
+        description: Exact candidate base commit SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autodev-promotion-${{ github.event.inputs.promotionRunId }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      AUTODEV_CONTROL_PLANE_URL: https://assayer-autodev-control-plane.gr8white911.workers.dev
+    steps:
+      - name: Checkout assayer-autodev control code
+        uses: actions/checkout@v4
+        with:
+          path: control
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: control/package-lock.json
+
+      - name: Install pinned dependencies
+        working-directory: control
+        run: npm ci
+
+      - name: Checkout exact candidate base
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.destinationRepository }}
+          ref: ${{ github.event.inputs.baseCommitSha }}
+          token: ${{ secrets.AUTODEV_PROMOTION_GITHUB_TOKEN }}
+          path: promotion-target
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Promote independently verified candidate
+        working-directory: control
+        env:
+          AUTODEV_SERVICE_TOKEN: ${{ secrets.AUTODEV_SERVICE_TOKEN }}
+          PROMOTION_RUN_ID: ${{ github.event.inputs.promotionRunId }}
+          PROJECT_ID: ${{ github.event.inputs.projectId }}
+          CODE_CANDIDATE_ID: ${{ github.event.inputs.codeCandidateId }}
+          TASK_ID: ${{ github.event.inputs.taskId }}
+          WORKER_RUN_ID: ${{ github.event.inputs.workerRunId }}
+          VERIFIER_RUN_ID: ${{ github.event.inputs.verifierRunId }}
+          DESTINATION_REPOSITORY: ${{ github.event.inputs.destinationRepository }}
+          DESTINATION_REF: ${{ github.event.inputs.destinationRef }}
+        run: >-
+          npm run orchestrated-promotion --
+          --promotion-run-id "$PROMOTION_RUN_ID"
+          --project-id "$PROJECT_ID"
+          --code-candidate-id "$CODE_CANDIDATE_ID"
+          --task-id "$TASK_ID"
+          --worker-run-id "$WORKER_RUN_ID"
+          --verifier-run-id "$VERIFIER_RUN_ID"
+          --destination-repository "$DESTINATION_REPOSITORY"
+          --destination-ref "$DESTINATION_REF"
+          --work-dir "$GITHUB_WORKSPACE/promotion-target"

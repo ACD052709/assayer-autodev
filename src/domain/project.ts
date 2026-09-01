@@ -8,6 +8,8 @@ export interface Project extends Timestamps, StatusRecord<ProjectStatus> {
   readonly targetRepository?: string;
   readonly targetRef?: string;
   readonly targetTestCommand?: string;
+  readonly promotionRepository?: string;
+  readonly promotionRefPrefix?: string;
   readonly doNotModifyConstraints: readonly string[];
 }
 
@@ -26,6 +28,8 @@ export interface CreateProjectInput {
   readonly targetRepository?: string;
   readonly targetRef?: string;
   readonly targetTestCommand?: string;
+  readonly promotionRepository?: string;
+  readonly promotionRefPrefix?: string;
   readonly doNotModifyConstraints?: readonly string[];
 }
 
@@ -34,5 +38,7 @@ export interface UpdateProjectWorkerTargetInput {
   readonly targetRepository?: string;
   readonly targetRef?: string;
   readonly targetTestCommand?: string;
+  readonly promotionRepository?: string;
+  readonly promotionRefPrefix?: string;
   readonly doNotModifyConstraints?: readonly string[];
 }

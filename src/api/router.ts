@@ -1,7 +1,10 @@
 import type { AsyncStateStore } from "../state/async-store.js";
 import type { WorkerReport } from "../domain/index.js";
+import { codeCandidateIdForWorkerRun } from "../domain/code-candidate.js";
+import { assertPromotionRefPrefixAllowed, assertPromotionRepositoryAllowed, PromotionTargetError } from "../domain/promotion-target.js";
 import type { EvidenceBlobStore } from "../evidence/index.js";
-import { evidenceBlobKey } from "../evidence/index.js";
+import { evidenceBlobKey, candidateBlobKey } from "../evidence/index.js";
+import { verifyPatchChecksum } from "../security/checksum.js";
 import type { MasterOrchestrator } from "../master/index.js";
 import { MasterModelConfigError } from "../master/index.js";
 import {
@@ -61,11 +64,18 @@ import {
 import { buildWorkerTaskPacket } from "../worker/task-packet.js";
 import { hashLeaseToken } from "../executor/lease.js";
 import { nowIso } from "../domain/common.js";
+import { runProjectAudit } from "../auditor/index.js";
+import type { AuditFindingStatus } from "../domain/audit-finding.js";
+import type { createAutoDevOrchestrator } from "../orchestrator/index.js";
+import { parseBrowserTestSpec } from "../verifier/browser-spec.js";
+
+export type AutoDevOrchestrator = ReturnType<typeof createAutoDevOrchestrator>;
 
 export interface ApiDependencies {
   store: AsyncStateStore;
   blobs: EvidenceBlobStore;
   masterOrchestrator?: MasterOrchestrator;
+  autoDevOrchestrator?: AutoDevOrchestrator;
   taskDispatcher?: WorkerDispatcher;
   workerRunLifecycle?: WorkerRunLifecycle;
 }
@@ -371,11 +381,27 @@ async function handlePostProject(request: Request, deps: ApiDependencies): Promi
     "targetRepository",
     "targetRef",
     "targetTestCommand",
+    "promotionRepository",
+    "promotionRefPrefix",
     "doNotModifyConstraints",
   ]);
   const targetRepository = assertOptionalRepositorySlug(body.targetRepository, "targetRepository");
   const targetRef = assertOptionalNonEmptyString(body.targetRef, "targetRef");
   const targetTestCommand = assertOptionalTrustedTestCommand(body.targetTestCommand, "targetTestCommand");
+  const promotionRepository = assertOptionalRepositorySlug(body.promotionRepository, "promotionRepository");
+  const promotionRefPrefix = assertOptionalNonEmptyString(body.promotionRefPrefix, "promotionRefPrefix");
+  try {
+    if (promotionRepository !== undefined) assertPromotionRepositoryAllowed(promotionRepository);
+    if (promotionRefPrefix !== undefined) assertPromotionRefPrefixAllowed(promotionRefPrefix);
+  } catch (error) {
+    if (error instanceof PromotionTargetError) {
+      throw new ApiError(400, "validation_error", error.message);
+    }
+    throw error;
+  }
+  if (promotionRepository !== undefined && targetRepository !== undefined && promotionRepository !== targetRepository) {
+    throw new ApiError(400, "validation_error", "Cross-repository promotion is not supported");
+  }
   const doNotModifyConstraints = assertDoNotModifyConstraints(
     body.doNotModifyConstraints,
     "doNotModifyConstraints",
@@ -387,9 +413,61 @@ async function handlePostProject(request: Request, deps: ApiDependencies): Promi
     ...(targetRepository !== undefined ? { targetRepository } : {}),
     ...(targetRef !== undefined ? { targetRef } : {}),
     ...(targetTestCommand !== undefined ? { targetTestCommand } : {}),
+    ...(promotionRepository !== undefined ? { promotionRepository } : {}),
+    ...(promotionRefPrefix !== undefined ? { promotionRefPrefix } : {}),
     ...(doNotModifyConstraints !== undefined ? { doNotModifyConstraints } : {}),
   });
   return jsonResponse({ project }, 201);
+}
+
+async function handlePostProjectTargetConfig(
+  params: Record<string, string>,
+  request: Request,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const projectId = assertEntityId(params.projectId, "projectId");
+  await requireProject(deps.store, projectId);
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, [
+    "targetRepository",
+    "targetRef",
+    "targetTestCommand",
+    "promotionRepository",
+    "promotionRefPrefix",
+    "doNotModifyConstraints",
+  ]);
+  const targetRepository = assertOptionalRepositorySlug(body.targetRepository, "targetRepository");
+  const targetRef = assertOptionalNonEmptyString(body.targetRef, "targetRef");
+  const targetTestCommand = assertOptionalTrustedTestCommand(body.targetTestCommand, "targetTestCommand");
+  const promotionRepository = assertOptionalRepositorySlug(body.promotionRepository, "promotionRepository");
+  const promotionRefPrefix = assertOptionalNonEmptyString(body.promotionRefPrefix, "promotionRefPrefix");
+  const doNotModifyConstraints = assertDoNotModifyConstraints(body.doNotModifyConstraints, "doNotModifyConstraints");
+  try {
+    if (promotionRepository !== undefined) assertPromotionRepositoryAllowed(promotionRepository);
+    if (promotionRefPrefix !== undefined) assertPromotionRefPrefixAllowed(promotionRefPrefix);
+  } catch (error) {
+    if (error instanceof PromotionTargetError) {
+      throw new ApiError(400, "validation_error", error.message);
+    }
+    throw error;
+  }
+  if (
+    promotionRepository !== undefined &&
+    targetRepository !== undefined &&
+    promotionRepository !== targetRepository
+  ) {
+    throw new ApiError(400, "validation_error", "Cross-repository promotion is not supported");
+  }
+  const project = await deps.store.updateProjectWorkerTarget({
+    projectId,
+    ...(targetRepository !== undefined ? { targetRepository } : {}),
+    ...(targetRef !== undefined ? { targetRef } : {}),
+    ...(targetTestCommand !== undefined ? { targetTestCommand } : {}),
+    ...(promotionRepository !== undefined ? { promotionRepository } : {}),
+    ...(promotionRefPrefix !== undefined ? { promotionRefPrefix } : {}),
+    ...(doNotModifyConstraints !== undefined ? { doNotModifyConstraints } : {}),
+  });
+  return jsonResponse({ project });
 }
 
 async function handlePostRequirement(request: Request, deps: ApiDependencies): Promise<Response> {
@@ -521,6 +599,76 @@ async function handlePostWorkerReport(request: Request, deps: ApiDependencies): 
   }
 }
 
+async function handleGetTestCase(params: Record<string, string>, deps: ApiDependencies): Promise<Response> {
+  const testCaseId = assertEntityId(params.testCaseId, "testCaseId");
+  const testCase = await deps.store.getTestCase(testCaseId);
+  if (testCase === undefined) {
+    throw new ApiError(404, "not_found", `Test case not found: ${testCaseId}`);
+  }
+  return jsonResponse({ testCase });
+}
+
+async function handlePostTestCase(request: Request, deps: ApiDependencies): Promise<Response> {
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, ["id", "projectId", "taskId", "name", "description", "kind", "browserSpecJson"]);
+  const projectId = assertEntityId(body.projectId, "projectId");
+  await requireProject(deps.store, projectId);
+  const id = assertEntityId(body.id, "id");
+  const taskId = assertOptionalEntityId(body.taskId, "taskId");
+  if (taskId !== undefined) {
+    const task = await deps.store.getTask(taskId);
+    if (task === undefined) {
+      throw new ApiError(404, "not_found", `Task not found: ${taskId}`);
+    }
+    if (task.projectId !== projectId) {
+      throw new ApiError(400, "validation_error", "taskId does not belong to projectId");
+    }
+  }
+  const name = assertNonEmptyString(body.name, "name");
+  const description = assertNonEmptyString(body.description, "description");
+  const kind = validators.testCaseKind(body.kind, "kind");
+  const browserSpecJson = assertOptionalNonEmptyString(body.browserSpecJson, "browserSpecJson");
+  if (browserSpecJson !== undefined) {
+    if (kind !== "browser") {
+      throw new ApiError(400, "validation_error", "browserSpecJson is only valid for browser test cases");
+    }
+    let parsed: unknown;
+    try { parsed = JSON.parse(browserSpecJson); } catch {
+      throw new ApiError(400, "invalid_browser_spec", "browserSpecJson must be valid JSON");
+    }
+    try { parseBrowserTestSpec(parsed); } catch (error) {
+      const message = error instanceof Error ? error.message : "Invalid browser test specification";
+      throw new ApiError(400, "invalid_browser_spec", message);
+    }
+  }
+  const existing = await deps.store.getTestCase(id);
+  if (existing !== undefined) {
+    const sameProject = existing.projectId === projectId;
+    const sameTask = (existing.taskId ?? undefined) === taskId;
+    const sameFields =
+      sameProject &&
+      sameTask &&
+      existing.name === name &&
+      existing.description === description &&
+      existing.kind === kind &&
+      existing.browserSpecJson === browserSpecJson;
+    if (sameFields) {
+      return jsonResponse({ testCase: existing }, 200);
+    }
+    throw new ApiError(409, "conflict", `Test case already exists: ${id}`);
+  }
+  const testCase = await deps.store.createTestCase({
+    id,
+    projectId,
+    name,
+    description,
+    kind,
+    ...(browserSpecJson !== undefined ? { browserSpecJson } : {}),
+    ...(taskId !== undefined ? { taskId } : {}),
+  });
+  return jsonResponse({ testCase }, 201);
+}
+
 async function handlePostTestResult(request: Request, deps: ApiDependencies): Promise<Response> {
   const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
   rejectUnknownKeys(body, [
@@ -635,11 +783,18 @@ async function handlePostEvidence(
 
 async function handlePostVerifierRun(request: Request, deps: ApiDependencies): Promise<Response> {
   const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
-  rejectUnknownKeys(body, ["id", "projectId", "taskId", "outcome", "summary", "evidenceIds"]);
+  rejectUnknownKeys(body, ["id", "projectId", "taskId", "codeCandidateId", "outcome", "summary", "evidenceIds"]);
   const projectId = assertEntityId(body.projectId, "projectId");
   await requireProject(deps.store, projectId);
   const taskId = assertEntityId(body.taskId, "taskId");
   const id = assertEntityId(body.id, "id");
+  const codeCandidateId = assertOptionalEntityId(body.codeCandidateId, "codeCandidateId");
+  if (codeCandidateId !== undefined) {
+    const candidate = await deps.store.getCodeCandidate(codeCandidateId);
+    if (candidate === undefined || candidate.projectId !== projectId) {
+      throw new ApiError(404, "not_found", `Code candidate not found: ${codeCandidateId}`);
+    }
+  }
   const task = await deps.store.getTask(taskId);
   if (task === undefined) {
     throw new ApiError(404, "not_found", `Task not found: ${taskId}`);
@@ -662,7 +817,7 @@ async function handlePostVerifierRun(request: Request, deps: ApiDependencies): P
     return jsonResponse({ verifierRun }, 201);
   }
 
-  const verifierRun = await deps.store.createVerifierRun({ id, projectId, taskId });
+  const verifierRun = await deps.store.createVerifierRun({ id, projectId, taskId, ...(codeCandidateId !== undefined ? { codeCandidateId } : {}) });
   return jsonResponse({ verifierRun }, 201);
 }
 
@@ -1141,6 +1296,294 @@ async function handlePostRecoverExpiredRuns(
   }
 }
 
+async function handlePostProjectAudit(
+  params: Record<string, string>,
+  request: Request,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const projectId = assertEntityId(params.projectId, "projectId");
+  await requireProject(deps.store, projectId);
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, []);
+  const result = await runProjectAudit(deps.store, projectId, { now: nowIso() });
+  const activeFindings = result.findings.filter((finding) => finding.status === "active");
+  return jsonResponse({
+    projectId,
+    evaluatedAt: result.evaluatedAt,
+    activeCount: result.activeCount,
+    resolvedCount: result.resolvedCount,
+    findings: activeFindings,
+  });
+}
+
+async function handleGetProjectAuditFindings(
+  params: Record<string, string>,
+  request: Request,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const projectId = assertEntityId(params.projectId, "projectId");
+  await requireProject(deps.store, projectId);
+  const url = new URL(request.url);
+  const statusParam = url.searchParams.get("status") ?? "active";
+  const status: AuditFindingStatus | "all" =
+    statusParam === "active" || statusParam === "resolved" || statusParam === "all"
+      ? statusParam
+      : (() => {
+          throw new ApiError(400, "invalid_status", `Invalid audit finding status: ${statusParam}`);
+        })();
+  const findings = await deps.store.listAuditFindingsByProject(projectId, { status });
+  return jsonResponse({ projectId, status, findings });
+}
+
+async function handlePostCodeCandidate(request: Request, deps: ApiDependencies): Promise<Response> {
+  const body = await readJsonBody(request, MAX_EVIDENCE_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, [
+    "id",
+    "projectId",
+    "taskId",
+    "workerRunId",
+    "sourceRepository",
+    "sourceRef",
+    "parentCandidateId",
+    "baseCommitSha",
+    "changedFiles",
+    "patchChecksumSha256",
+    "patchBase64",
+    "testCommand",
+    "testExitCode",
+  ]);
+  const projectId = assertEntityId(body.projectId, "projectId");
+  const project = await requireProject(deps.store, projectId);
+  const id = assertEntityId(body.id, "id");
+  const taskId = assertEntityId(body.taskId, "taskId");
+  const workerRunId = assertEntityId(body.workerRunId, "workerRunId");
+  const workerRun = await deps.store.getWorkerRun(workerRunId);
+  if (workerRun === undefined || workerRun.taskId !== taskId || workerRun.projectId !== projectId) {
+    throw new ApiError(404, "not_found", `Worker run not found: ${workerRunId}`);
+  }
+  const expectedCandidateId = codeCandidateIdForWorkerRun(taskId, workerRunId);
+  if (id !== expectedCandidateId) {
+    throw new ApiError(400, "invalid_candidate_id", `Candidate id must be ${expectedCandidateId}`);
+  }
+  const sourceRepository = assertNonEmptyString(body.sourceRepository, "sourceRepository");
+  assertOptionalRepositorySlug(sourceRepository, "sourceRepository");
+  if (project.targetRepository !== undefined && sourceRepository !== project.targetRepository) {
+    throw new ApiError(409, "target_mismatch", "Candidate repository does not match project target");
+  }
+  const sourceRef = assertOptionalNonEmptyString(body.sourceRef, "sourceRef");
+  const parentCandidateId = assertOptionalEntityId(body.parentCandidateId, "parentCandidateId");
+  if (project.targetRef !== undefined && sourceRef !== project.targetRef) {
+    throw new ApiError(409, "target_mismatch", "Candidate source ref does not match project target ref");
+  }
+  if (parentCandidateId !== undefined) {
+    const parent = await deps.store.getCodeCandidate(parentCandidateId);
+    if (parent === undefined || parent.projectId !== projectId || parent.sourceRepository !== sourceRepository) {
+      throw new ApiError(409, "invalid_parent_candidate", "Parent candidate is missing or incompatible");
+    }
+  }
+  const baseCommitSha = assertNonEmptyString(body.baseCommitSha, "baseCommitSha");
+  if (!/^[0-9a-f]{40,64}$/i.test(baseCommitSha)) {
+    throw new ApiError(400, "invalid_field", "baseCommitSha must be a full git commit SHA");
+  }
+  const changedFilesRaw = body.changedFiles;
+  if (!Array.isArray(changedFilesRaw) || !changedFilesRaw.every((entry) => typeof entry === "string")) {
+    throw new ApiError(400, "invalid_field", "changedFiles must be a string array");
+  }
+  const changedFiles = changedFilesRaw as string[];
+  if (changedFiles.length === 0 || changedFiles.some((path) => path.length === 0 || path.startsWith("/") || path.includes(".."))) {
+    throw new ApiError(400, "invalid_field", "changedFiles must contain safe relative paths");
+  }
+  const patchChecksumSha256 = assertNonEmptyString(body.patchChecksumSha256, "patchChecksumSha256");
+  if (!/^[0-9a-f]{64}$/i.test(patchChecksumSha256)) {
+    throw new ApiError(400, "invalid_field", "patchChecksumSha256 must be a SHA-256 hex digest");
+  }
+  const patchBase64 = assertNonEmptyString(body.patchBase64, "patchBase64");
+  const testCommand = assertNonEmptyString(body.testCommand, "testCommand");
+  const testExitCode = assertOptionalNumber(body.testExitCode, "testExitCode");
+  if (testExitCode === undefined || testExitCode !== 0) {
+    throw new ApiError(400, "invalid_field", "testExitCode must be 0 for candidate creation");
+  }
+
+  const patchBytes = decodeBootstrapBase64(patchBase64, MAX_BOOTSTRAP_BLOB_BYTES);
+  const patchText = new TextDecoder().decode(patchBytes);
+  if (patchText.length === 0) {
+    throw new ApiError(400, "invalid_field", "Candidate patch must not be empty");
+  }
+  if (!verifyPatchChecksum(patchText, patchChecksumSha256)) {
+    throw new ApiError(400, "checksum_mismatch", "Patch checksum does not match content");
+  }
+
+  const existing =
+    (await deps.store.getCodeCandidate(id)) ??
+    (await deps.store.getCodeCandidateByWorkerRun(taskId, workerRunId));
+  if (existing !== undefined) {
+    const same =
+      existing.id === id &&
+      existing.projectId === projectId &&
+      existing.taskId === taskId &&
+      existing.workerRunId === workerRunId &&
+      existing.sourceRepository === sourceRepository &&
+      existing.sourceRef === sourceRef &&
+      existing.parentCandidateId === parentCandidateId &&
+      existing.baseCommitSha === baseCommitSha &&
+      existing.patchChecksumSha256 === patchChecksumSha256 &&
+      existing.testCommand === testCommand &&
+      existing.testExitCode === testExitCode &&
+      JSON.stringify(existing.changedFiles) === JSON.stringify(changedFiles);
+    if (!same) {
+      throw new ApiError(409, "candidate_conflict", "Code candidate already exists with different immutable metadata");
+    }
+    const existingPatch = await deps.blobs.get(existing.patchContentRef);
+    if (existingPatch === null || !verifyPatchChecksum(new TextDecoder().decode(existingPatch), existing.patchChecksumSha256)) {
+      throw new ApiError(409, "candidate_integrity_error", "Existing candidate artifact is missing or invalid");
+    }
+    return jsonResponse({ candidate: existing }, 200);
+  }
+
+  const blobKey = candidateBlobKey(projectId, id);
+  const ref = await deps.blobs.put(blobKey, patchBytes, "text/x-patch");
+  try {
+    const candidate = await deps.store.createCodeCandidate({
+      id,
+      projectId,
+      taskId,
+      workerRunId,
+      sourceRepository,
+      ...(sourceRef !== undefined ? { sourceRef } : {}),
+      ...(parentCandidateId !== undefined ? { parentCandidateId } : {}),
+      baseCommitSha,
+      changedFiles,
+      patchChecksumSha256,
+      patchContentRef: ref.key,
+      testCommand,
+      testExitCode,
+    });
+    return jsonResponse({ candidate }, 201);
+  } catch (error) {
+    try {
+      await deps.blobs.delete(blobKey);
+    } catch {
+      // best effort
+    }
+    throw error;
+  }
+}
+
+async function handleGetCodeCandidatePatch(
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const candidateId = assertEntityId(params.candidateId, "candidateId");
+  const candidate = await deps.store.getCodeCandidate(candidateId);
+  if (candidate === undefined) {
+    throw new ApiError(404, "not_found", `Code candidate not found: ${candidateId}`);
+  }
+  const patch = await deps.blobs.get(candidate.patchContentRef);
+  if (patch === null) {
+    throw new ApiError(404, "not_found", "Candidate patch blob not found");
+  }
+  return new Response(patch, {
+    status: 200,
+    headers: {
+      "content-type": "text/x-patch; charset=utf-8",
+      "x-patch-checksum-sha256": candidate.patchChecksumSha256,
+    },
+  });
+}
+
+async function handlePostPromotionRunComplete(
+  params: Record<string, string>,
+  request: Request,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const promotionRunId = assertEntityId(params.promotionRunId, "promotionRunId");
+  const promotionRun = await deps.store.getPromotionRun(promotionRunId);
+  if (promotionRun === undefined) {
+    throw new ApiError(404, "not_found", `Promotion run not found: ${promotionRunId}`);
+  }
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, ["status", "resultingCommitSha", "errorMessage"]);
+  const status = assertNonEmptyString(body.status, "status");
+  if (status !== "succeeded" && status !== "failed") {
+    throw new ApiError(400, "invalid_status", "status must be succeeded or failed");
+  }
+  const resultingCommitSha = assertOptionalNonEmptyString(body.resultingCommitSha, "resultingCommitSha");
+  const errorMessage = assertOptionalNonEmptyString(body.errorMessage, "errorMessage");
+  if (status === "succeeded" && resultingCommitSha === undefined) {
+    throw new ApiError(400, "invalid_field", "resultingCommitSha is required when status is succeeded");
+  }
+  if (promotionRun.status === "succeeded") {
+    if (status === "succeeded" && resultingCommitSha === promotionRun.resultingCommitSha) {
+      return jsonResponse({ promotionRun });
+    }
+    throw new ApiError(409, "promotion_already_completed", "Promotion run already succeeded with a different result");
+  }
+
+  const completed = await deps.store.completePromotionRun({
+    promotionRunId,
+    status,
+    ...(resultingCommitSha !== undefined ? { resultingCommitSha } : {}),
+    ...(errorMessage !== undefined ? { errorMessage } : {}),
+  });
+  if (status === "succeeded" && resultingCommitSha !== undefined) {
+    await deps.store.completeCodeCandidatePromotion({
+      codeCandidateId: promotionRun.codeCandidateId,
+      promotionRunId,
+      resultingCommitSha,
+    });
+  }
+  return jsonResponse({ promotionRun: completed });
+}
+
+async function handleGetCodeCandidate(
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const candidateId = assertEntityId(params.candidateId, "candidateId");
+  const candidate = await deps.store.getCodeCandidate(candidateId);
+  if (candidate === undefined) {
+    throw new ApiError(404, "not_found", `Code candidate not found: ${candidateId}`);
+  }
+  return jsonResponse({ candidate });
+}
+
+async function handleGetPromotionRun(
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const promotionRunId = assertEntityId(params.promotionRunId, "promotionRunId");
+  const promotionRun = await deps.store.getPromotionRun(promotionRunId);
+  if (promotionRun === undefined) {
+    throw new ApiError(404, "not_found", `Promotion run not found: ${promotionRunId}`);
+  }
+  return jsonResponse({ promotionRun });
+}
+
+function orchestratorFor(deps: ApiDependencies): AutoDevOrchestrator {
+  if (deps.autoDevOrchestrator === undefined) {
+    throw new ApiError(503, "orchestrator_misconfigured", "AutoDev orchestrator is not configured");
+  }
+  return deps.autoDevOrchestrator;
+}
+
+async function handlePostProjectOrchestrate(
+  params: Record<string, string>,
+  request: Request,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const projectId = assertEntityId(params.projectId, "projectId");
+  await requireProject(deps.store, projectId);
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, ["runMasterReevaluation", "runAudit", "haltOnCriticalAudit"]);
+  const result = await orchestratorFor(deps).runCycle(projectId, {
+    now: nowIso(),
+    runMasterReevaluation: body.runMasterReevaluation !== false,
+    runAudit: body.runAudit !== false,
+    haltOnCriticalAudit: body.haltOnCriticalAudit === true,
+  });
+  return jsonResponse(result);
+}
+
 async function handlePostWorkerRunRetry(
   params: Record<string, string>,
   request: Request,
@@ -1216,6 +1659,12 @@ const routes: readonly {
   },
   {
     method: "POST",
+    pattern: "/api/projects/:projectId/target-config",
+    policy: MASTER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostProjectTargetConfig(params, request, deps),
+  },
+  {
+    method: "POST",
     pattern: "/api/requirements",
     policy: MASTER_WRITE_POLICY,
     handler: (request, _params, deps) => handlePostRequirement(request, deps),
@@ -1245,6 +1694,18 @@ const routes: readonly {
     handler: (request, _params, deps) => handlePostWorkerReport(request, deps),
   },
   {
+    method: "GET",
+    pattern: "/api/test-cases/:testCaseId",
+    policy: VERIFIER_WRITE_POLICY,
+    handler: (_request, params, deps) => handleGetTestCase(params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/test-cases",
+    policy: VERIFIER_WRITE_POLICY,
+    handler: (request, _params, deps) => handlePostTestCase(request, deps),
+  },
+  {
     method: "POST",
     pattern: "/api/test-results",
     policy: VERIFIER_WRITE_POLICY,
@@ -1255,6 +1716,36 @@ const routes: readonly {
     pattern: "/api/evidence",
     policy: policyFor(["worker", "verifier", "admin"]),
     handler: (request, _params, deps) => handlePostEvidence(request, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/code-candidates",
+    policy: WORKER_WRITE_POLICY,
+    handler: (request, _params, deps) => handlePostCodeCandidate(request, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/code-candidates/:candidateId",
+    policy: WORKER_WRITE_POLICY,
+    handler: (_request, params, deps) => handleGetCodeCandidate(params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/code-candidates/:candidateId/patch",
+    policy: WORKER_WRITE_POLICY,
+    handler: (_request, params, deps) => handleGetCodeCandidatePatch(params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/promotion-runs/:promotionRunId",
+    policy: WORKER_WRITE_POLICY,
+    handler: (_request, params, deps) => handleGetPromotionRun(params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/promotion-runs/:promotionRunId/complete",
+    policy: WORKER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostPromotionRunComplete(params, request, deps),
   },
   {
     method: "POST",
@@ -1327,6 +1818,24 @@ const routes: readonly {
     pattern: "/api/projects/:projectId/recover-expired-runs",
     policy: MASTER_WRITE_POLICY,
     handler: (request, params, deps) => handlePostRecoverExpiredRuns(params, request, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:projectId/audit",
+    policy: MASTER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostProjectAudit(params, request, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:projectId/audit-findings",
+    policy: READ_POLICY,
+    handler: (request, params, deps) => handleGetProjectAuditFindings(params, request, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:projectId/orchestrate",
+    policy: MASTER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostProjectOrchestrate(params, request, deps),
   },
   {
     method: "GET",

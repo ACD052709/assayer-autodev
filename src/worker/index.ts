@@ -1,8 +1,7 @@
 import { createApiRouter } from "../api/index.js";
-import { createWorkerDispatcher, createGitHubLaunchBridgeFromEnv } from "../dispatch/index.js";
-import { createWorkerRunLifecycle } from "../executor/index.js";
-import { R2EvidenceBlobStore } from "../evidence/index.js";
+import { createControlPlaneComposition } from "../orchestrator/runtime-composition.js";
 import { createMasterOrchestrator, OpenAIMasterModelClient } from "../master/index.js";
+import { R2EvidenceBlobStore } from "../evidence/index.js";
 import { createD1StateStore } from "../state/d1-store.js";
 import type { WorkerEnv } from "./env.js";
 
@@ -18,18 +17,20 @@ export default {
             client: new OpenAIMasterModelClient({ apiKey: openaiKey }),
           })
         : undefined;
-    const launchBridge = createGitHubLaunchBridgeFromEnv(env);
-    const taskDispatcher = createWorkerDispatcher({
+
+    const composition = createControlPlaneComposition({
       store,
-      ...(launchBridge !== undefined ? { launchBridge } : {}),
+      env,
+      ...(masterOrchestrator !== undefined ? { masterOrchestrator } : {}),
     });
-    const workerRunLifecycle = createWorkerRunLifecycle({ store, dispatcher: taskDispatcher });
+
     const router = createApiRouter({
       deps: {
         store,
         blobs,
-        taskDispatcher,
-        workerRunLifecycle,
+        taskDispatcher: composition.taskDispatcher,
+        workerRunLifecycle: composition.workerRunLifecycle,
+        autoDevOrchestrator: composition.autoDevOrchestrator,
         ...(masterOrchestrator !== undefined ? { masterOrchestrator } : {}),
       },
       auth: {

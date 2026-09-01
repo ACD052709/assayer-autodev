@@ -151,6 +151,10 @@ function createRecordingClient(options?: {
         },
       };
     },
+    async createCodeCandidate(input) {
+      calls.push({ op: "createCodeCandidate", id: input.id });
+      return { id: input.id };
+    },
   };
   void heartbeatCount;
   return { client, calls };

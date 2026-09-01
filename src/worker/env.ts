@@ -15,4 +15,9 @@ export interface WorkerEnv {
   readonly GITHUB_WORKFLOW_FILE?: string;
   readonly GITHUB_WORKFLOW_REF?: string;
   readonly GITHUB_EXECUTION_MODE?: string;
+  /** Optional default target URL passed to scheduled browser verifier runs. */
+  readonly BROWSER_VERIFIER_TARGET_URL?: string;
+  /** Workflow file for independent browser verification (default autodev-browser-verifier.yml). */
+  readonly GITHUB_VERIFIER_WORKFLOW_FILE?: string;
+  readonly GITHUB_PROMOTION_WORKFLOW_FILE?: string;
 }

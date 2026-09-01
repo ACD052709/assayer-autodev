@@ -85,6 +85,23 @@ export interface ControlPlaneClient {
   succeed(workerRunId: string, leaseToken: string, input: SucceedInput): Promise<TerminalResult>;
   fail(workerRunId: string, leaseToken: string, input: FailInput): Promise<TerminalResult>;
   getTaskPacket(workerRunId: string, leaseToken: string): Promise<import("../domain/worker-task-packet.js").WorkerTaskPacket>;
+  getCodeCandidate?(candidateId: string): Promise<import("../domain/code-candidate.js").CodeCandidate>;
+  fetchCodeCandidatePatch?(candidateId: string): Promise<string>;
+  createCodeCandidate(input: {
+    readonly id: string;
+    readonly projectId: string;
+    readonly taskId: string;
+    readonly workerRunId: string;
+    readonly sourceRepository: string;
+    readonly sourceRef?: string;
+    readonly parentCandidateId?: string;
+    readonly baseCommitSha: string;
+    readonly changedFiles: readonly string[];
+    readonly patchContent: string;
+    readonly patchChecksumSha256: string;
+    readonly testCommand: string;
+    readonly testExitCode: number;
+  }): Promise<{ readonly id: string }>;
 }
 
 export interface ActuatorLogger {

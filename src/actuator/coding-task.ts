@@ -1,9 +1,13 @@
 import type { WorkerTaskPacket } from "../domain/worker-task-packet.js";
+import { codeCandidateIdForWorkerRun } from "../domain/code-candidate.js";
+import { sha256Hex } from "../security/checksum.js";
 import { ActuatorError } from "./errors.js";
 import { buildCodingTaskPrompt } from "./coding-task-prompt.js";
 import {
+  captureCheckoutCandidate,
   prepareIsolatedCheckout,
   readCheckoutChanges,
+  type GitCaptureReader,
   type GitRunner,
   type GitStatusReader,
 } from "./coding-task-checkout.js";
@@ -11,6 +15,7 @@ import { buildCursorCliInvocation, parseTrustedTestCommand } from "./cursor-cli.
 import type { ProcessRunner } from "./process-runner.js";
 import type { ControlPlaneClient } from "./types.js";
 import { CODING_TASK_KIND } from "./types.js";
+import { sanitizedCandidateEnv } from "./subprocess-env.js";
 
 export interface CodingTaskRunInput {
   readonly workerRunId: string;
@@ -22,6 +27,7 @@ export interface CodingTaskRunInput {
   readonly process: ProcessRunner;
   readonly git: GitRunner;
   readonly gitStatus: GitStatusReader;
+  readonly gitCapture?: GitCaptureReader;
   readonly signal?: AbortSignal;
   readonly now?: () => number;
 }
@@ -106,10 +112,22 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
     throw new ActuatorError("invalid_config", "Task packet is missing targetTestCommand");
   }
 
+  let parentCandidate: import("../domain/code-candidate.js").CodeCandidate | undefined;
+  let parentPatchContent: string | undefined;
+  if (packet.parentCandidateId !== undefined) {
+    if (input.client.getCodeCandidate === undefined || input.client.fetchCodeCandidatePatch === undefined) {
+      throw new ActuatorError("invalid_config", "Control-plane candidate read methods are required for repair tasks");
+    }
+    parentCandidate = await input.client.getCodeCandidate(packet.parentCandidateId);
+    parentPatchContent = await input.client.fetchCodeCandidatePatch(packet.parentCandidateId);
+  }
+
   const { checkoutDir } = await prepareIsolatedCheckout({
     packet,
     workspaceRoot: input.workspaceRoot,
     git: input.git,
+    ...(parentCandidate !== undefined ? { parentCandidate } : {}),
+    ...(parentPatchContent !== undefined ? { parentPatchContent } : {}),
   });
   const prompt = buildCodingTaskPrompt(packet);
   const invocation = buildCursorCliInvocation({
@@ -125,7 +143,7 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
     timeoutMs: invocation.timeoutMs,
     ...(input.signal !== undefined ? { signal: input.signal } : {}),
     env: {
-      ...process.env,
+      ...sanitizedCandidateEnv(),
       CURSOR_API_KEY: input.cursorApiKey,
     },
   });
@@ -138,6 +156,7 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
     cwd: checkoutDir,
     timeoutMs: input.codingTaskTimeoutMs,
     ...(input.signal !== undefined ? { signal: input.signal } : {}),
+    env: sanitizedCandidateEnv(),
   });
 
   const durationMs = (input.now?.() ?? Date.now()) - startedAt;
@@ -172,6 +191,29 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
       summary: failureReason,
       structuredOutcome,
     };
+  }
+
+  if (changes.changedFileCount > 0) {
+    const gitCapture = input.gitCapture;
+    if (gitCapture === undefined) {
+      throw new ActuatorError("invalid_config", "Git capture reader is required when checkout has changes");
+    }
+    const capture = await captureCheckoutCandidate(checkoutDir, gitCapture);
+    await input.client.createCodeCandidate({
+      id: codeCandidateIdForWorkerRun(packet.taskId, input.workerRunId),
+      projectId: packet.projectId,
+      taskId: packet.taskId,
+      workerRunId: input.workerRunId,
+      sourceRepository: packet.targetRepository!,
+      ...(packet.targetRef !== undefined ? { sourceRef: packet.targetRef } : {}),
+      ...(packet.parentCandidateId !== undefined ? { parentCandidateId: packet.parentCandidateId } : {}),
+      baseCommitSha: capture.baseCommitSha,
+      changedFiles: capture.changedFiles,
+      patchContent: capture.patchContent,
+      patchChecksumSha256: sha256Hex(capture.patchContent),
+      testCommand: packet.targetTestCommand,
+      testExitCode: testResult.exitCode,
+    });
   }
 
   return {

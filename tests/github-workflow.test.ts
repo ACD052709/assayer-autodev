@@ -7,6 +7,14 @@ const workflow = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "../.github/workflows/autodev-worker.yml"),
   "utf8",
 );
+const verifierWorkflow = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "../.github/workflows/autodev-browser-verifier.yml"),
+  "utf8",
+);
+const promotionWorkflow = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "../.github/workflows/autodev-promote.yml"),
+  "utf8",
+);
 
 describe("GitHub Actions worker workflow", () => {
   it("is workflow_dispatch only with least-privilege permissions", () => {
@@ -43,5 +51,34 @@ describe("GitHub Actions worker workflow", () => {
     expect(workflow).toContain("coding-task");
     expect(workflow).not.toContain("cursor-acp");
     expect(workflow).not.toContain("--command");
+  });
+});
+
+describe("GitHub Actions browser verifier workflow", () => {
+  it("is workflow_dispatch only and does not use Cursor credentials", () => {
+    expect(verifierWorkflow).toContain("workflow_dispatch:");
+    expect(verifierWorkflow).toContain("verifierRunId:");
+    expect(verifierWorkflow).toContain("orchestrated-verifier");
+    expect(verifierWorkflow).toContain("secrets.AUTODEV_SERVICE_TOKEN");
+    expect(verifierWorkflow).not.toContain("CURSOR_API_KEY");
+    expect(verifierWorkflow).not.toContain("executionMode");
+    expect(verifierWorkflow).toContain("playwright install");
+  });
+});
+
+
+describe("GitHub Actions verified promotion workflow", () => {
+  it("is dispatch-only with separate write credential and no Cursor/verifier credential leakage", () => {
+    expect(promotionWorkflow).toContain("workflow_dispatch:");
+    expect(promotionWorkflow).toContain("orchestrated-promotion");
+    expect(promotionWorkflow).toContain("baseCommitSha:");
+    expect(promotionWorkflow).toContain("secrets.AUTODEV_PROMOTION_GITHUB_TOKEN");
+    expect(promotionWorkflow).toContain("secrets.AUTODEV_SERVICE_TOKEN");
+    expect(promotionWorkflow).not.toContain("CURSOR_API_KEY");
+    expect(promotionWorkflow).not.toContain("playwright");
+    expect(promotionWorkflow).not.toContain("push --force");
+    expect(promotionWorkflow).not.toContain("--force-with-lease");
+    expect(promotionWorkflow).toContain("permissions:");
+    expect(promotionWorkflow).toContain("contents: read");
   });
 });

@@ -12,3 +12,7 @@ export interface EvidenceBlobStore {
 export function evidenceBlobKey(projectId: string, evidenceId: string): string {
   return `${projectId}/evidence/${evidenceId}`;
 }
+
+export function candidateBlobKey(projectId: string, candidateId: string): string {
+  return `${projectId}/candidates/${candidateId}`;
+}

@@ -1,8 +1,8 @@
 import { ActuatorError, sanitizeActuatorError } from "./errors.js";
 import { startHeartbeatLoop } from "./heartbeat-loop.js";
 import { createSanitizingLogger } from "./logger.js";
-import type { GitRunner, GitStatusReader } from "./coding-task-checkout.js";
-import { createGitRunner, createGitStatusReader } from "./coding-task-checkout.js";
+import type { GitRunner, GitStatusReader, GitCaptureReader } from "./coding-task-checkout.js";
+import { createGitRunner, createGitStatusReader, createGitCaptureReader } from "./coding-task-checkout.js";
 import { runCodingTask } from "./coding-task.js";
 import type { ProcessRunner } from "./process-runner.js";
 import { createSubprocessRunner } from "./process-runner.js";
@@ -34,6 +34,7 @@ export interface RunActuatorOptions {
   readonly processRunner?: ProcessRunner;
   readonly gitRunner?: GitRunner;
   readonly gitStatusReader?: GitStatusReader;
+  readonly gitCaptureReader?: GitCaptureReader;
 }
 
 const DEFAULT_TIMERS: ActuatorTimers = {
@@ -122,6 +123,7 @@ export async function runActuator(options: RunActuatorOptions): Promise<Actuator
           process: options.processRunner ?? createSubprocessRunner(),
           git: options.gitRunner ?? createGitRunner(),
           gitStatus: options.gitStatusReader ?? createGitStatusReader(),
+          gitCapture: options.gitCaptureReader ?? createGitCaptureReader(),
           signal: workAbort.signal,
         });
         await heartbeat.stop();

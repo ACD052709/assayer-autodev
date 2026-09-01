@@ -1,8 +1,10 @@
 import type { D1Database } from "@cloudflare/workers-types";
 import type {
   AcceptanceCriterion,
+  AuditFinding,
   Blocker,
   BudgetCategory,
+  CodeCandidate,
   BudgetCheckResult,
   BudgetEntry,
   BudgetLedger,
@@ -18,6 +20,8 @@ import type {
   CreateMasterInboxItemInput,
   CreateMasterRunInput,
   CreatePermissionRequestInput,
+  CreatePromotionRunInput,
+  MarkCodeCandidatePromotionEligibleInput,
   CreateProjectInput,
   UpdateProjectWorkerTargetInput,
   CreateReleaseContractInput,
@@ -40,6 +44,9 @@ import type {
   CreateWorkerRunInput,
   DecidePermissionInput,
   CompleteVerifierRunInput,
+  CompleteCodeCandidatePromotionInput,
+  CompletePromotionRunInput,
+  CreateCodeCandidateInput,
   DefinitionOfDone,
   DefinitionOfDoneCriterion,
   Deployment,
@@ -57,6 +64,7 @@ import type {
   Permission,
   PermissionRequest,
   Project,
+  PromotionRun,
   ReleaseContract,
   Requirement,
   Task,
@@ -87,6 +95,12 @@ import {
   toJson,
 } from "./d1/mappers.js";
 import { interpretStoredCost } from "../master/pricing.js";
+import {
+  auditFindingIdFromKey,
+  type ListAuditFindingsFilter,
+  type SyncAuditFindingsInput,
+  type SyncAuditFindingsResult,
+} from "../domain/audit-finding.js";
 
 function sumUsage(entries: readonly BudgetEntry[], category: BudgetCategory): number {
   return entries
@@ -114,6 +128,8 @@ interface ProjectRow {
   target_repository: string | null;
   target_ref: string | null;
   target_test_command: string | null;
+  promotion_repository: string | null;
+  promotion_ref_prefix: string | null;
   do_not_modify_constraints_json: string;
 }
 
@@ -146,6 +162,7 @@ interface TaskRow {
   title: string;
   description: string;
   kind: string;
+  browser_spec_json: string | null;
   status: string;
   status_changed_at: string;
   dependency_ids_json: string;
@@ -211,6 +228,7 @@ interface TestCaseRow {
   name: string;
   description: string;
   kind: string;
+  browser_spec_json: string | null;
   status: string;
   status_changed_at: string;
   created_at: string;
@@ -294,6 +312,7 @@ interface VerifierRunRow {
   id: string;
   project_id: string;
   task_id: string;
+  code_candidate_id: string | null;
   status: string;
   status_changed_at: string;
   outcome: string | null;
@@ -388,6 +407,67 @@ interface BlockerRow {
   updated_at: string;
 }
 
+interface AuditFindingRow {
+  id: string;
+  project_id: string;
+  finding_key: string;
+  rule_code: string;
+  severity: string;
+  status: string;
+  summary: string;
+  details_json: string;
+  task_id: string | null;
+  worker_run_id: string | null;
+  verifier_run_id: string | null;
+  first_observed_at: string;
+  last_observed_at: string;
+  resolved_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface CodeCandidateRow {
+  id: string;
+  project_id: string;
+  task_id: string;
+  worker_run_id: string;
+  source_repository: string;
+  source_ref: string | null;
+  parent_candidate_id: string | null;
+  base_commit_sha: string;
+  changed_files_json: string;
+  patch_checksum_sha256: string;
+  patch_content_ref: string;
+  test_command: string;
+  test_exit_code: number;
+  status: string;
+  verifier_run_id: string | null;
+  accepted_task_id: string | null;
+  promotion_run_id: string | null;
+  resulting_commit_sha: string | null;
+  promoted_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface PromotionRunRow {
+  id: string;
+  project_id: string;
+  code_candidate_id: string;
+  task_id: string;
+  worker_run_id: string;
+  verifier_run_id: string;
+  destination_repository: string;
+  destination_ref: string;
+  base_commit_sha: string;
+  status: string;
+  resulting_commit_sha: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
 interface MasterRunRow {
   id: string;
   project_id: string;
@@ -425,6 +505,8 @@ function rowToProject(row: ProjectRow): Project {
   const targetRepository = optionalString(row.target_repository);
   const targetRef = optionalString(row.target_ref);
   const targetTestCommand = optionalString(row.target_test_command);
+  const promotionRepository = optionalString(row.promotion_repository);
+  const promotionRefPrefix = optionalString(row.promotion_ref_prefix);
   return {
     id: row.id,
     name: row.name,
@@ -433,6 +515,8 @@ function rowToProject(row: ProjectRow): Project {
     ...(targetRepository !== undefined ? { targetRepository } : {}),
     ...(targetRef !== undefined ? { targetRef } : {}),
     ...(targetTestCommand !== undefined ? { targetTestCommand } : {}),
+    ...(promotionRepository !== undefined ? { promotionRepository } : {}),
+    ...(promotionRefPrefix !== undefined ? { promotionRefPrefix } : {}),
     status: row.status as Project["status"],
     statusChangedAt: row.status_changed_at,
     createdAt: row.created_at,
@@ -560,6 +644,7 @@ function rowToTestCase(row: TestCaseRow): TestCase {
     name: row.name,
     description: row.description,
     kind: row.kind as TestCase["kind"],
+    ...(optionalString(row.browser_spec_json) !== undefined ? { browserSpecJson: optionalString(row.browser_spec_json)! } : {}),
     status: row.status as TestCase["status"],
     statusChangedAt: row.status_changed_at,
     createdAt: row.created_at,
@@ -681,10 +766,12 @@ function rowToVerifierRun(row: VerifierRunRow): VerifierRun {
   const startedAt = optionalString(row.started_at);
   const completedAt = optionalString(row.completed_at);
   const summary = optionalString(row.summary);
+  const codeCandidateId = optionalString(row.code_candidate_id);
   return {
     id: row.id,
     projectId: row.project_id,
     taskId: row.task_id,
+    ...(codeCandidateId !== undefined ? { codeCandidateId } : {}),
     evidenceIds: parseJsonArray<EntityId>(row.evidence_ids_json),
     status: row.status as VerifierRun["status"],
     statusChangedAt: row.status_changed_at,
@@ -793,6 +880,31 @@ function rowToBlocker(row: BlockerRow): Blocker {
   };
 }
 
+function rowToAuditFinding(row: AuditFindingRow): AuditFinding {
+  const taskId = optionalString(row.task_id);
+  const workerRunId = optionalString(row.worker_run_id);
+  const verifierRunId = optionalString(row.verifier_run_id);
+  const resolvedAt = optionalString(row.resolved_at);
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    findingKey: row.finding_key,
+    ruleCode: row.rule_code as AuditFinding["ruleCode"],
+    severity: row.severity as AuditFinding["severity"],
+    status: row.status as AuditFinding["status"],
+    summary: row.summary,
+    details: parseJsonObject(row.details_json) ?? {},
+    firstObservedAt: row.first_observed_at,
+    lastObservedAt: row.last_observed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...(taskId !== undefined ? { taskId } : {}),
+    ...(workerRunId !== undefined ? { workerRunId } : {}),
+    ...(verifierRunId !== undefined ? { verifierRunId } : {}),
+    ...(resolvedAt !== undefined ? { resolvedAt } : {}),
+  };
+}
+
 function rowToMasterRun(row: MasterRunRow): MasterRun {
   const trigger = optionalString(row.trigger);
   const context = optionalString(row.context);
@@ -828,6 +940,62 @@ function rowToMasterRun(row: MasterRunRow): MasterRun {
   };
 }
 
+function rowToCodeCandidate(row: CodeCandidateRow): CodeCandidate {
+  const sourceRef = optionalString(row.source_ref);
+  const parentCandidateId = optionalString(row.parent_candidate_id);
+  const verifierRunId = optionalString(row.verifier_run_id);
+  const acceptedTaskId = optionalString(row.accepted_task_id);
+  const promotionRunId = optionalString(row.promotion_run_id);
+  const resultingCommitSha = optionalString(row.resulting_commit_sha);
+  const promotedAt = optionalString(row.promoted_at);
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    taskId: row.task_id,
+    workerRunId: row.worker_run_id,
+    sourceRepository: row.source_repository,
+    ...(sourceRef !== undefined ? { sourceRef } : {}),
+    ...(parentCandidateId !== undefined ? { parentCandidateId } : {}),
+    baseCommitSha: row.base_commit_sha,
+    changedFiles: parseJsonArray<string>(row.changed_files_json),
+    patchChecksumSha256: row.patch_checksum_sha256,
+    patchContentRef: row.patch_content_ref,
+    testCommand: row.test_command,
+    testExitCode: row.test_exit_code,
+    status: row.status as CodeCandidate["status"],
+    ...(verifierRunId !== undefined ? { verifierRunId } : {}),
+    ...(acceptedTaskId !== undefined ? { acceptedTaskId } : {}),
+    ...(promotionRunId !== undefined ? { promotionRunId } : {}),
+    ...(resultingCommitSha !== undefined ? { resultingCommitSha } : {}),
+    ...(promotedAt !== undefined ? { promotedAt } : {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToPromotionRun(row: PromotionRunRow): PromotionRun {
+  const resultingCommitSha = optionalString(row.resulting_commit_sha);
+  const errorMessage = optionalString(row.error_message);
+  const completedAt = optionalString(row.completed_at);
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    codeCandidateId: row.code_candidate_id,
+    taskId: row.task_id,
+    workerRunId: row.worker_run_id,
+    verifierRunId: row.verifier_run_id,
+    destinationRepository: row.destination_repository,
+    destinationRef: row.destination_ref,
+    baseCommitSha: row.base_commit_sha,
+    status: row.status as PromotionRun["status"],
+    ...(resultingCommitSha !== undefined ? { resultingCommitSha } : {}),
+    ...(errorMessage !== undefined ? { errorMessage } : {}),
+    ...(completedAt !== undefined ? { completedAt } : {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 export class D1StateStore implements AsyncStateStore {
   constructor(private readonly db: D1Database) {}
 
@@ -841,6 +1009,8 @@ export class D1StateStore implements AsyncStateStore {
       ...(input.targetRepository !== undefined ? { targetRepository: input.targetRepository } : {}),
       ...(input.targetRef !== undefined ? { targetRef: input.targetRef } : {}),
       ...(input.targetTestCommand !== undefined ? { targetTestCommand: input.targetTestCommand } : {}),
+      ...(input.promotionRepository !== undefined ? { promotionRepository: input.promotionRepository } : {}),
+      ...(input.promotionRefPrefix !== undefined ? { promotionRefPrefix: input.promotionRefPrefix } : {}),
       ...ts,
       ...withStatus("active"),
     };
@@ -848,8 +1018,9 @@ export class D1StateStore implements AsyncStateStore {
       .prepare(
         `INSERT INTO projects
          (id, name, description, status, status_changed_at, created_at, updated_at,
-          target_repository, target_ref, target_test_command, do_not_modify_constraints_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          target_repository, target_ref, target_test_command, promotion_repository, promotion_ref_prefix,
+          do_not_modify_constraints_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         project.id,
@@ -862,6 +1033,8 @@ export class D1StateStore implements AsyncStateStore {
         project.targetRepository ?? null,
         project.targetRef ?? null,
         project.targetTestCommand ?? null,
+        project.promotionRepository ?? null,
+        project.promotionRefPrefix ?? null,
         JSON.stringify(project.doNotModifyConstraints),
       )
       .run();
@@ -890,6 +1063,9 @@ export class D1StateStore implements AsyncStateStore {
       ...existing,
       ...(input.targetRepository !== undefined ? { targetRepository: input.targetRepository } : {}),
       ...(input.targetRef !== undefined ? { targetRef: input.targetRef } : {}),
+      ...(input.targetTestCommand !== undefined ? { targetTestCommand: input.targetTestCommand } : {}),
+      ...(input.promotionRepository !== undefined ? { promotionRepository: input.promotionRepository } : {}),
+      ...(input.promotionRefPrefix !== undefined ? { promotionRefPrefix: input.promotionRefPrefix } : {}),
       ...(input.doNotModifyConstraints !== undefined
         ? { doNotModifyConstraints: [...input.doNotModifyConstraints] }
         : {}),
@@ -898,13 +1074,17 @@ export class D1StateStore implements AsyncStateStore {
     await this.db
       .prepare(
         `UPDATE projects
-         SET target_repository = ?, target_ref = ?, target_test_command = ?, do_not_modify_constraints_json = ?, updated_at = ?
+         SET target_repository = ?, target_ref = ?, target_test_command = ?,
+             promotion_repository = ?, promotion_ref_prefix = ?,
+             do_not_modify_constraints_json = ?, updated_at = ?
          WHERE id = ?`,
       )
       .bind(
         updated.targetRepository ?? null,
         updated.targetRef ?? null,
         updated.targetTestCommand ?? null,
+        updated.promotionRepository ?? null,
+        updated.promotionRefPrefix ?? null,
         JSON.stringify(updated.doNotModifyConstraints),
         updated.updatedAt,
         input.projectId,
@@ -1762,14 +1942,15 @@ export class D1StateStore implements AsyncStateStore {
       name: input.name,
       description: input.description,
       kind: input.kind,
+      ...(input.browserSpecJson !== undefined ? { browserSpecJson: input.browserSpecJson } : {}),
       ...createTimestamps(),
       ...withStatus("active"),
     };
     await this.db
       .prepare(
         `INSERT INTO test_cases
-         (id, project_id, task_id, name, description, kind, status, status_changed_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, project_id, task_id, name, description, kind, browser_spec_json, status, status_changed_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         testCase.id,
@@ -1778,6 +1959,7 @@ export class D1StateStore implements AsyncStateStore {
         testCase.name,
         testCase.description,
         testCase.kind,
+        testCase.browserSpecJson ?? null,
         testCase.status,
         testCase.statusChangedAt,
         testCase.createdAt,
@@ -1877,7 +2059,7 @@ export class D1StateStore implements AsyncStateStore {
         `INSERT INTO evidence
          (id, project_id, task_id, worker_run_id, verifier_run_id, git_revision_id, deployment_id,
           kind, label, uri, content_ref, mime_type, metadata_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         item.id,
@@ -2148,6 +2330,7 @@ export class D1StateStore implements AsyncStateStore {
       id: input.id,
       projectId: input.projectId,
       taskId: input.taskId,
+      ...(input.codeCandidateId !== undefined ? { codeCandidateId: input.codeCandidateId } : {}),
       evidenceIds: [],
       ...createTimestamps(),
       ...withStatus("pending"),
@@ -2155,13 +2338,14 @@ export class D1StateStore implements AsyncStateStore {
     await this.db
       .prepare(
         `INSERT INTO verifier_runs
-         (id, project_id, task_id, status, status_changed_at, evidence_ids_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, project_id, task_id, code_candidate_id, status, status_changed_at, evidence_ids_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         run.id,
         run.projectId,
         run.taskId,
+        run.codeCandidateId ?? null,
         run.status,
         run.statusChangedAt,
         toJson(run.evidenceIds),
@@ -2791,6 +2975,405 @@ export class D1StateStore implements AsyncStateStore {
       .bind(projectId)
       .all<MasterRunRow>();
     return (result.results ?? []).map(rowToMasterRun);
+  }
+
+  async syncAuditFindings(input: SyncAuditFindingsInput): Promise<SyncAuditFindingsResult> {
+    const detectedKeys = new Set(input.detected.map((finding) => finding.findingKey));
+    let newlyCreated = 0;
+    let reactivated = 0;
+
+    for (const detected of input.detected) {
+      const existingRow = await this.db
+        .prepare(`SELECT * FROM audit_findings WHERE project_id = ? AND finding_key = ?`)
+        .bind(input.projectId, detected.findingKey)
+        .first<AuditFindingRow>();
+
+      if (existingRow === null || existingRow === undefined) {
+        const created: AuditFinding = {
+          id: auditFindingIdFromKey(detected.findingKey),
+          projectId: detected.projectId,
+          findingKey: detected.findingKey,
+          ruleCode: detected.ruleCode,
+          severity: detected.severity,
+          status: "active",
+          summary: detected.summary,
+          details: detected.details,
+          firstObservedAt: input.now,
+          lastObservedAt: input.now,
+          ...createTimestamps(input.now),
+          ...(detected.taskId !== undefined ? { taskId: detected.taskId } : {}),
+          ...(detected.workerRunId !== undefined ? { workerRunId: detected.workerRunId } : {}),
+          ...(detected.verifierRunId !== undefined ? { verifierRunId: detected.verifierRunId } : {}),
+        };
+        await this.db
+          .prepare(
+            `INSERT INTO audit_findings
+             (id, project_id, finding_key, rule_code, severity, status, summary, details_json,
+              task_id, worker_run_id, verifier_run_id, first_observed_at, last_observed_at,
+              resolved_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            created.id,
+            created.projectId,
+            created.findingKey,
+            created.ruleCode,
+            created.severity,
+            created.status,
+            created.summary,
+            toJson(created.details),
+            created.taskId ?? null,
+            created.workerRunId ?? null,
+            created.verifierRunId ?? null,
+            created.firstObservedAt,
+            created.lastObservedAt,
+            null,
+            created.createdAt,
+            created.updatedAt,
+          )
+          .run();
+        newlyCreated += 1;
+        continue;
+      }
+
+      const existing = rowToAuditFinding(existingRow);
+      const wasResolved = existing.status === "resolved";
+      const updated: AuditFinding = {
+        ...existing,
+        ruleCode: detected.ruleCode,
+        severity: detected.severity,
+        status: "active",
+        summary: detected.summary,
+        details: detected.details,
+        lastObservedAt: input.now,
+        ...touchTimestamps(existing, input.now),
+        ...(detected.taskId !== undefined ? { taskId: detected.taskId } : {}),
+        ...(detected.workerRunId !== undefined ? { workerRunId: detected.workerRunId } : {}),
+        ...(detected.verifierRunId !== undefined ? { verifierRunId: detected.verifierRunId } : {}),
+      };
+      if (wasResolved) {
+        reactivated += 1;
+      }
+      const { resolvedAt: _removed, ...persisted } = updated as AuditFinding & { resolvedAt?: string };
+      await this.db
+        .prepare(
+          `UPDATE audit_findings
+           SET rule_code = ?, severity = ?, status = ?, summary = ?, details_json = ?,
+               task_id = ?, worker_run_id = ?, verifier_run_id = ?, last_observed_at = ?,
+               resolved_at = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .bind(
+          persisted.ruleCode,
+          persisted.severity,
+          persisted.status,
+          persisted.summary,
+          toJson(persisted.details),
+          persisted.taskId ?? null,
+          persisted.workerRunId ?? null,
+          persisted.verifierRunId ?? null,
+          persisted.lastObservedAt,
+          null,
+          persisted.updatedAt,
+          persisted.id,
+        )
+        .run();
+    }
+
+    const activeRows = await this.db
+      .prepare(`SELECT * FROM audit_findings WHERE project_id = ? AND status = 'active'`)
+      .bind(input.projectId)
+      .all<AuditFindingRow>();
+    let resolvedCount = 0;
+    for (const row of activeRows.results ?? []) {
+      if (detectedKeys.has(row.finding_key)) {
+        continue;
+      }
+      const at = input.now;
+      await this.db
+        .prepare(
+          `UPDATE audit_findings SET status = 'resolved', resolved_at = ?, updated_at = ? WHERE id = ?`,
+        )
+        .bind(at, at, row.id)
+        .run();
+      resolvedCount += 1;
+    }
+
+    const findings = await this.listAuditFindingsByProject(input.projectId, { status: "all" });
+    const activeCount = findings.filter((finding) => finding.status === "active").length;
+    return {
+      findings,
+      activeCount,
+      resolvedCount,
+      newlyCreated,
+      reactivated,
+    };
+  }
+
+  async listAuditFindingsByProject(
+    projectId: EntityId,
+    filter: ListAuditFindingsFilter = { status: "active" },
+  ): Promise<readonly AuditFinding[]> {
+    const status = filter.status ?? "active";
+    const result =
+      status === "all"
+        ? await this.db
+            .prepare(`SELECT * FROM audit_findings WHERE project_id = ? ORDER BY last_observed_at DESC`)
+            .bind(projectId)
+            .all<AuditFindingRow>()
+        : await this.db
+            .prepare(
+              `SELECT * FROM audit_findings WHERE project_id = ? AND status = ? ORDER BY last_observed_at DESC`,
+            )
+            .bind(projectId, status)
+            .all<AuditFindingRow>();
+    return (result.results ?? []).map(rowToAuditFinding);
+  }
+
+  async createCodeCandidate(input: CreateCodeCandidateInput): Promise<CodeCandidate> {
+    const existing = await this.getCodeCandidateByWorkerRun(input.taskId, input.workerRunId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const ts = createTimestamps();
+    const candidate: CodeCandidate = {
+      id: input.id,
+      projectId: input.projectId,
+      taskId: input.taskId,
+      workerRunId: input.workerRunId,
+      sourceRepository: input.sourceRepository,
+      ...(input.sourceRef !== undefined ? { sourceRef: input.sourceRef } : {}),
+      ...(input.parentCandidateId !== undefined ? { parentCandidateId: input.parentCandidateId } : {}),
+      baseCommitSha: input.baseCommitSha,
+      changedFiles: [...input.changedFiles],
+      patchChecksumSha256: input.patchChecksumSha256,
+      patchContentRef: input.patchContentRef,
+      testCommand: input.testCommand,
+      testExitCode: input.testExitCode,
+      status: "pending_verification",
+      ...ts,
+    };
+    await this.db
+      .prepare(
+        `INSERT INTO code_candidates
+         (id, project_id, task_id, worker_run_id, source_repository, source_ref, parent_candidate_id, base_commit_sha,
+          changed_files_json, patch_checksum_sha256, patch_content_ref, test_command, test_exit_code,
+          status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        candidate.id,
+        candidate.projectId,
+        candidate.taskId,
+        candidate.workerRunId,
+        candidate.sourceRepository,
+        candidate.sourceRef ?? null,
+        candidate.parentCandidateId ?? null,
+        candidate.baseCommitSha,
+        JSON.stringify(candidate.changedFiles),
+        candidate.patchChecksumSha256,
+        candidate.patchContentRef,
+        candidate.testCommand,
+        candidate.testExitCode,
+        candidate.status,
+        candidate.createdAt,
+        candidate.updatedAt,
+      )
+      .run();
+    return candidate;
+  }
+
+  async getCodeCandidate(id: EntityId): Promise<CodeCandidate | undefined> {
+    const row = await this.db
+      .prepare(`SELECT * FROM code_candidates WHERE id = ?`)
+      .bind(id)
+      .first<CodeCandidateRow>();
+    return row ? rowToCodeCandidate(row) : undefined;
+  }
+
+  async getCodeCandidateByWorkerRun(
+    taskId: EntityId,
+    workerRunId: EntityId,
+  ): Promise<CodeCandidate | undefined> {
+    const row = await this.db
+      .prepare(`SELECT * FROM code_candidates WHERE task_id = ? AND worker_run_id = ?`)
+      .bind(taskId, workerRunId)
+      .first<CodeCandidateRow>();
+    return row ? rowToCodeCandidate(row) : undefined;
+  }
+
+  async listCodeCandidatesByProject(projectId: EntityId): Promise<readonly CodeCandidate[]> {
+    const result = await this.db
+      .prepare(`SELECT * FROM code_candidates WHERE project_id = ? ORDER BY id`)
+      .bind(projectId)
+      .all<CodeCandidateRow>();
+    return (result.results ?? []).map(rowToCodeCandidate);
+  }
+
+  async markCodeCandidatePromotionEligible(
+    input: MarkCodeCandidatePromotionEligibleInput,
+  ): Promise<CodeCandidate> {
+    const existing = await this.getCodeCandidate(input.codeCandidateId);
+    if (existing === undefined) {
+      throw new Error(`Code candidate not found: ${input.codeCandidateId}`);
+    }
+    if (existing.status === "promoted") {
+      return existing;
+    }
+    const updated: CodeCandidate = {
+      ...existing,
+      status: "promotion_eligible",
+      verifierRunId: input.verifierRunId,
+      acceptedTaskId: input.acceptedTaskId ?? existing.taskId,
+      ...touchTimestamps(existing),
+    };
+    await this.db
+      .prepare(
+        `UPDATE code_candidates SET status = ?, verifier_run_id = ?, accepted_task_id = ?, updated_at = ? WHERE id = ?`,
+      )
+      .bind(updated.status, updated.verifierRunId ?? null, updated.acceptedTaskId ?? null, updated.updatedAt, updated.id)
+      .run();
+    return updated;
+  }
+
+  async completeCodeCandidatePromotion(
+    input: CompleteCodeCandidatePromotionInput,
+  ): Promise<CodeCandidate> {
+    const existing = await this.getCodeCandidate(input.codeCandidateId);
+    if (existing === undefined) {
+      throw new Error(`Code candidate not found: ${input.codeCandidateId}`);
+    }
+    if (existing.status === "promoted" && existing.resultingCommitSha === input.resultingCommitSha) {
+      return existing;
+    }
+    const now = nowIso();
+    const updated: CodeCandidate = {
+      ...existing,
+      status: "promoted",
+      promotionRunId: input.promotionRunId,
+      resultingCommitSha: input.resultingCommitSha,
+      promotedAt: now,
+      ...touchTimestamps(existing, now),
+    };
+    await this.db
+      .prepare(
+        `UPDATE code_candidates
+         SET status = ?, promotion_run_id = ?, resulting_commit_sha = ?, promoted_at = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .bind(
+        updated.status,
+        updated.promotionRunId ?? null,
+        updated.resultingCommitSha ?? null,
+        updated.promotedAt ?? null,
+        updated.updatedAt,
+        updated.id,
+      )
+      .run();
+    return updated;
+  }
+
+  async createPromotionRun(input: CreatePromotionRunInput): Promise<PromotionRun> {
+    const existing = await this.getPromotionRunByCandidate(input.codeCandidateId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const ts = createTimestamps();
+    const run: PromotionRun = {
+      id: input.id,
+      projectId: input.projectId,
+      codeCandidateId: input.codeCandidateId,
+      taskId: input.taskId,
+      workerRunId: input.workerRunId,
+      verifierRunId: input.verifierRunId,
+      destinationRepository: input.destinationRepository,
+      destinationRef: input.destinationRef,
+      baseCommitSha: input.baseCommitSha,
+      status: "pending",
+      ...ts,
+    };
+    await this.db
+      .prepare(
+        `INSERT INTO promotion_runs
+         (id, project_id, code_candidate_id, task_id, worker_run_id, verifier_run_id,
+          destination_repository, destination_ref, base_commit_sha, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        run.id,
+        run.projectId,
+        run.codeCandidateId,
+        run.taskId,
+        run.workerRunId,
+        run.verifierRunId,
+        run.destinationRepository,
+        run.destinationRef,
+        run.baseCommitSha,
+        run.status,
+        run.createdAt,
+        run.updatedAt,
+      )
+      .run();
+    return run;
+  }
+
+  async getPromotionRun(id: EntityId): Promise<PromotionRun | undefined> {
+    const row = await this.db
+      .prepare(`SELECT * FROM promotion_runs WHERE id = ?`)
+      .bind(id)
+      .first<PromotionRunRow>();
+    return row ? rowToPromotionRun(row) : undefined;
+  }
+
+  async getPromotionRunByCandidate(codeCandidateId: EntityId): Promise<PromotionRun | undefined> {
+    const row = await this.db
+      .prepare(`SELECT * FROM promotion_runs WHERE code_candidate_id = ?`)
+      .bind(codeCandidateId)
+      .first<PromotionRunRow>();
+    return row ? rowToPromotionRun(row) : undefined;
+  }
+
+  async listPromotionRunsByProject(projectId: EntityId): Promise<readonly PromotionRun[]> {
+    const result = await this.db
+      .prepare(`SELECT * FROM promotion_runs WHERE project_id = ? ORDER BY id`)
+      .bind(projectId)
+      .all<PromotionRunRow>();
+    return (result.results ?? []).map(rowToPromotionRun);
+  }
+
+  async completePromotionRun(input: CompletePromotionRunInput): Promise<PromotionRun> {
+    const existing = await this.getPromotionRun(input.promotionRunId);
+    if (existing === undefined) {
+      throw new Error(`Promotion run not found: ${input.promotionRunId}`);
+    }
+    if (existing.status === "succeeded" && input.status === "succeeded") {
+      return existing;
+    }
+    const now = nowIso();
+    const updated: PromotionRun = {
+      ...existing,
+      status: input.status,
+      ...(input.resultingCommitSha !== undefined ? { resultingCommitSha: input.resultingCommitSha } : {}),
+      ...(input.errorMessage !== undefined ? { errorMessage: input.errorMessage } : {}),
+      completedAt: now,
+      ...touchTimestamps(existing, now),
+    };
+    await this.db
+      .prepare(
+        `UPDATE promotion_runs
+         SET status = ?, resulting_commit_sha = ?, error_message = ?, completed_at = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .bind(
+        updated.status,
+        updated.resultingCommitSha ?? null,
+        updated.errorMessage ?? null,
+        updated.completedAt ?? null,
+        updated.updatedAt,
+        updated.id,
+      )
+      .run();
+    return updated;
   }
 }
 

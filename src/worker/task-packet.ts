@@ -2,6 +2,7 @@ import type { Blocker, Requirement } from "../domain/index.js";
 import type { WorkerRun } from "../domain/index.js";
 import type { WorkerTaskPacket } from "../domain/index.js";
 import type { AsyncStateStore } from "../state/async-store.js";
+import { parseRepairTaskContext } from "../orchestrator/repair-context.js";
 
 function isApplicableRequirement(requirement: Requirement): boolean {
   return requirement.status === "approved";
@@ -51,6 +52,8 @@ export async function buildWorkerTaskPacket(
     isRelevantBlocker(blocker, task.id, workerRun.id),
   );
 
+  const repairContext = parseRepairTaskContext(task.description);
+
   return {
     workerRunId: workerRun.id,
     taskId: task.id,
@@ -70,6 +73,7 @@ export async function buildWorkerTaskPacket(
     ...(project.targetRepository !== undefined ? { targetRepository: project.targetRepository } : {}),
     ...(project.targetRef !== undefined ? { targetRef: project.targetRef } : {}),
     ...(project.targetTestCommand !== undefined ? { targetTestCommand: project.targetTestCommand } : {}),
+    ...(repairContext?.parentCandidateId !== undefined ? { parentCandidateId: repairContext.parentCandidateId } : {}),
     execution: {
       workerKind: workerRun.workerKind,
       iteration: workerRun.iteration,

@@ -1,13 +1,12 @@
-# External GitHub Actions worker actuator (synthetic-noop and coding-task).
+# GitHub Actions implementation worker actuator (synthetic-noop and coding-task).
 #
-# NEXT STAGE (not implemented): a control-plane launch bridge would call
-# GitHub workflow_dispatch after the dispatcher creates a queued worker_run.
-# Launch stays manual until this actuator is proven. Do not auto-start
-# workflows from the Worker in this phase.
+# The control-plane launch bridge may dispatch this workflow for a queued
+# worker_run. Coding work occurs in an isolated checkout and is captured as a
+# candidate; this workflow does not directly promote verified code. Promotion
+# is handled by the separate AutoDev promotion workflow.
 #
-# This workflow talks only to the assayer-autodev control-plane HTTP API.
-# It must not clone Assayer, access Cloudflare/OpenAI credentials, deploy,
-# push commits, or modify D1 directly.
+# This workflow communicates with the assayer-autodev control plane and uses
+# only the credentials required for its implementation role.
 
 name: AutoDev worker
 

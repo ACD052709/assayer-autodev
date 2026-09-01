@@ -4,9 +4,14 @@ import type {
   BudgetEntry,
   BudgetLedger,
   BudgetLimit,
+  CodeCandidate,
+  PromotionRun,
   CreateAcceptanceCriterionInput,
   CreateBlockerInput,
   CreateBudgetEntryInput,
+  CreateCodeCandidateInput,
+  CompleteCodeCandidatePromotionInput,
+  CompletePromotionRunInput,
   CreateDefinitionOfDoneInput,
   CreateDeploymentInput,
   CreateEvidenceInput,
@@ -14,6 +19,8 @@ import type {
   CreateMasterInboxItemInput,
   CreateMasterRunInput,
   CreatePermissionRequestInput,
+  CreatePromotionRunInput,
+  MarkCodeCandidatePromotionEligibleInput,
   CreateProjectInput,
   UpdateProjectWorkerTargetInput,
   CreateReleaseContractInput,
@@ -201,4 +208,25 @@ export interface StateStore {
   createMasterRun(input: CreateMasterRunInput): MasterRun;
   getMasterRun(id: EntityId): MasterRun | undefined;
   listMasterRunsByProject(projectId: EntityId): readonly MasterRun[];
+
+  // Auditor / watchdog
+  syncAuditFindings(input: import("../domain/audit-finding.js").SyncAuditFindingsInput): import("../domain/audit-finding.js").SyncAuditFindingsResult;
+  listAuditFindingsByProject(
+    projectId: EntityId,
+    filter?: import("../domain/audit-finding.js").ListAuditFindingsFilter,
+  ): readonly import("../domain/audit-finding.js").AuditFinding[];
+
+  // Code persistence (Part 7)
+  createCodeCandidate(input: CreateCodeCandidateInput): CodeCandidate;
+  getCodeCandidate(id: EntityId): CodeCandidate | undefined;
+  getCodeCandidateByWorkerRun(taskId: EntityId, workerRunId: EntityId): CodeCandidate | undefined;
+  listCodeCandidatesByProject(projectId: EntityId): readonly CodeCandidate[];
+  markCodeCandidatePromotionEligible(input: MarkCodeCandidatePromotionEligibleInput): CodeCandidate;
+  completeCodeCandidatePromotion(input: CompleteCodeCandidatePromotionInput): CodeCandidate;
+
+  createPromotionRun(input: CreatePromotionRunInput): PromotionRun;
+  getPromotionRun(id: EntityId): PromotionRun | undefined;
+  getPromotionRunByCandidate(codeCandidateId: EntityId): PromotionRun | undefined;
+  listPromotionRunsByProject(projectId: EntityId): readonly PromotionRun[];
+  completePromotionRun(input: CompletePromotionRunInput): PromotionRun;
 }

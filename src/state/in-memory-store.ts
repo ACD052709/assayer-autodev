@@ -1,5 +1,6 @@
 import type {
   AcceptanceCriterion,
+  AuditFinding,
   Blocker,
   BudgetCategory,
   BudgetCheckResult,
@@ -9,6 +10,10 @@ import type {
   CreateBlockerInput,
   CreateBudgetEntryInput,
   AddBudgetResourceInput,
+  CodeCandidate,
+  CompleteCodeCandidatePromotionInput,
+  CompletePromotionRunInput,
+  CreateCodeCandidateInput,
   CreateDefinitionOfDoneInput,
   CreateDeploymentInput,
   CreateEvidenceInput,
@@ -16,6 +21,8 @@ import type {
   CreateMasterInboxItemInput,
   CreateMasterRunInput,
   CreatePermissionRequestInput,
+  CreatePromotionRunInput,
+  MarkCodeCandidatePromotionEligibleInput,
   CreateProjectInput,
   UpdateProjectWorkerTargetInput,
   CreateReleaseContractInput,
@@ -51,6 +58,7 @@ import type {
   Permission,
   PermissionRequest,
   Project,
+  PromotionRun,
   ReleaseContract,
   Requirement,
   Task,
@@ -65,6 +73,12 @@ import type {
   WorkerRun,
   WorkerRunTaskTransitionResult,
 } from "../domain/index.js";
+import {
+  auditFindingIdFromKey,
+  type ListAuditFindingsFilter,
+  type SyncAuditFindingsInput,
+  type SyncAuditFindingsResult,
+} from "../domain/audit-finding.js";
 import { createTimestamps, nowIso, touchTimestamps, withStatus } from "../domain/common.js";
 import { isTerminalWorkerRunStatus } from "../domain/worker.js";
 import { isLeaseExpired, timingSafeEqual } from "../executor/lease.js";
@@ -121,6 +135,9 @@ export class InMemoryStateStore implements StateStore {
   private readonly acceptanceCriteria = new Map<EntityId, AcceptanceCriterion>();
   private readonly blockers = new Map<EntityId, Blocker>();
   private readonly masterRuns = new Map<EntityId, MasterRun>();
+  private readonly auditFindings = new Map<EntityId, AuditFinding>();
+  private readonly codeCandidates = new Map<EntityId, CodeCandidate>();
+  private readonly promotionRuns = new Map<EntityId, PromotionRun>();
 
   createProject(input: CreateProjectInput): Project {
     const ts = createTimestamps();
@@ -132,6 +149,8 @@ export class InMemoryStateStore implements StateStore {
       ...(input.targetRepository !== undefined ? { targetRepository: input.targetRepository } : {}),
       ...(input.targetRef !== undefined ? { targetRef: input.targetRef } : {}),
       ...(input.targetTestCommand !== undefined ? { targetTestCommand: input.targetTestCommand } : {}),
+      ...(input.promotionRepository !== undefined ? { promotionRepository: input.promotionRepository } : {}),
+      ...(input.promotionRefPrefix !== undefined ? { promotionRefPrefix: input.promotionRefPrefix } : {}),
       ...ts,
       ...withStatus("active"),
     };
@@ -157,6 +176,8 @@ export class InMemoryStateStore implements StateStore {
       ...(input.targetRepository !== undefined ? { targetRepository: input.targetRepository } : {}),
       ...(input.targetRef !== undefined ? { targetRef: input.targetRef } : {}),
       ...(input.targetTestCommand !== undefined ? { targetTestCommand: input.targetTestCommand } : {}),
+      ...(input.promotionRepository !== undefined ? { promotionRepository: input.promotionRepository } : {}),
+      ...(input.promotionRefPrefix !== undefined ? { promotionRefPrefix: input.promotionRefPrefix } : {}),
       ...(input.doNotModifyConstraints !== undefined
         ? { doNotModifyConstraints: [...input.doNotModifyConstraints] }
         : {}),
@@ -614,6 +635,7 @@ export class InMemoryStateStore implements StateStore {
       name: input.name,
       description: input.description,
       kind: input.kind,
+      ...(input.browserSpecJson !== undefined ? { browserSpecJson: input.browserSpecJson } : {}),
       ...createTimestamps(),
       ...withStatus("active"),
     };
@@ -800,6 +822,7 @@ export class InMemoryStateStore implements StateStore {
       id: input.id,
       projectId: input.projectId,
       taskId: input.taskId,
+      ...(input.codeCandidateId !== undefined ? { codeCandidateId: input.codeCandidateId } : {}),
       evidenceIds: [],
       ...createTimestamps(),
       ...withStatus("pending"),
@@ -1147,6 +1170,254 @@ export class InMemoryStateStore implements StateStore {
     return [...this.masterRuns.values()]
       .filter((r) => r.projectId === projectId)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  syncAuditFindings(input: SyncAuditFindingsInput): SyncAuditFindingsResult {
+    const detectedKeys = new Set(input.detected.map((finding) => finding.findingKey));
+    let newlyCreated = 0;
+    let reactivated = 0;
+
+    for (const detected of input.detected) {
+      const existing = [...this.auditFindings.values()].find(
+        (finding) => finding.projectId === input.projectId && finding.findingKey === detected.findingKey,
+      );
+      if (existing === undefined) {
+        const created: AuditFinding = {
+          id: auditFindingIdFromKey(detected.findingKey),
+          projectId: detected.projectId,
+          findingKey: detected.findingKey,
+          ruleCode: detected.ruleCode,
+          severity: detected.severity,
+          status: "active",
+          summary: detected.summary,
+          details: detected.details,
+          firstObservedAt: input.now,
+          lastObservedAt: input.now,
+          ...createTimestamps(input.now),
+          ...(detected.taskId !== undefined ? { taskId: detected.taskId } : {}),
+          ...(detected.workerRunId !== undefined ? { workerRunId: detected.workerRunId } : {}),
+          ...(detected.verifierRunId !== undefined ? { verifierRunId: detected.verifierRunId } : {}),
+        };
+        this.auditFindings.set(created.id, created);
+        newlyCreated += 1;
+        continue;
+      }
+
+      const wasResolved = existing.status === "resolved";
+      const updated: AuditFinding = {
+        ...existing,
+        ruleCode: detected.ruleCode,
+        severity: detected.severity,
+        status: "active",
+        summary: detected.summary,
+        details: detected.details,
+        lastObservedAt: input.now,
+        ...touchTimestamps(existing, input.now),
+        ...(detected.taskId !== undefined ? { taskId: detected.taskId } : {}),
+        ...(detected.workerRunId !== undefined ? { workerRunId: detected.workerRunId } : {}),
+        ...(detected.verifierRunId !== undefined ? { verifierRunId: detected.verifierRunId } : {}),
+      };
+      if (wasResolved) {
+        const { resolvedAt: _removed, ...reactivatedFinding } = updated as AuditFinding & {
+          resolvedAt?: string;
+        };
+        this.auditFindings.set(existing.id, reactivatedFinding);
+        reactivated += 1;
+      } else {
+        this.auditFindings.set(existing.id, updated);
+      }
+    }
+
+    let resolvedCount = 0;
+    for (const finding of this.auditFindings.values()) {
+      if (finding.projectId !== input.projectId || finding.status !== "active") {
+        continue;
+      }
+      if (detectedKeys.has(finding.findingKey)) {
+        continue;
+      }
+      const resolved: AuditFinding = {
+        ...finding,
+        status: "resolved",
+        resolvedAt: input.now,
+        ...touchTimestamps(finding, input.now),
+      };
+      this.auditFindings.set(finding.id, resolved);
+      resolvedCount += 1;
+    }
+
+    const findings = this.listAuditFindingsByProject(input.projectId, { status: "all" });
+    const activeCount = findings.filter((finding) => finding.status === "active").length;
+    return {
+      findings,
+      activeCount,
+      resolvedCount,
+      newlyCreated,
+      reactivated,
+    };
+  }
+
+  listAuditFindingsByProject(
+    projectId: EntityId,
+    filter: ListAuditFindingsFilter = { status: "active" },
+  ): readonly AuditFinding[] {
+    const status = filter.status ?? "active";
+    return [...this.auditFindings.values()]
+      .filter((finding) => {
+        if (finding.projectId !== projectId) {
+          return false;
+        }
+        if (status === "all") {
+          return true;
+        }
+        return finding.status === status;
+      })
+      .sort((a, b) => b.lastObservedAt.localeCompare(a.lastObservedAt));
+  }
+
+  createCodeCandidate(input: CreateCodeCandidateInput): CodeCandidate {
+    const existing = [...this.codeCandidates.values()].find(
+      (candidate) => candidate.taskId === input.taskId && candidate.workerRunId === input.workerRunId,
+    );
+    if (existing !== undefined) {
+      return existing;
+    }
+    const ts = createTimestamps();
+    const candidate: CodeCandidate = {
+      id: input.id,
+      projectId: input.projectId,
+      taskId: input.taskId,
+      workerRunId: input.workerRunId,
+      sourceRepository: input.sourceRepository,
+      ...(input.sourceRef !== undefined ? { sourceRef: input.sourceRef } : {}),
+      ...(input.parentCandidateId !== undefined ? { parentCandidateId: input.parentCandidateId } : {}),
+      baseCommitSha: input.baseCommitSha,
+      changedFiles: [...input.changedFiles],
+      patchChecksumSha256: input.patchChecksumSha256,
+      patchContentRef: input.patchContentRef,
+      testCommand: input.testCommand,
+      testExitCode: input.testExitCode,
+      status: "pending_verification",
+      ...ts,
+    };
+    this.codeCandidates.set(candidate.id, candidate);
+    return candidate;
+  }
+
+  getCodeCandidate(id: EntityId): CodeCandidate | undefined {
+    return this.codeCandidates.get(id);
+  }
+
+  getCodeCandidateByWorkerRun(taskId: EntityId, workerRunId: EntityId): CodeCandidate | undefined {
+    return [...this.codeCandidates.values()].find(
+      (candidate) => candidate.taskId === taskId && candidate.workerRunId === workerRunId,
+    );
+  }
+
+  listCodeCandidatesByProject(projectId: EntityId): readonly CodeCandidate[] {
+    return [...this.codeCandidates.values()]
+      .filter((candidate) => candidate.projectId === projectId)
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  markCodeCandidatePromotionEligible(input: MarkCodeCandidatePromotionEligibleInput): CodeCandidate {
+    const existing = this.codeCandidates.get(input.codeCandidateId);
+    if (existing === undefined) {
+      throw new Error(`Code candidate not found: ${input.codeCandidateId}`);
+    }
+    if (existing.status === "promoted") {
+      return existing;
+    }
+    const updated: CodeCandidate = {
+      ...existing,
+      status: "promotion_eligible",
+      verifierRunId: input.verifierRunId,
+      acceptedTaskId: input.acceptedTaskId ?? existing.taskId,
+      ...touchTimestamps(existing),
+    };
+    this.codeCandidates.set(existing.id, updated);
+    return updated;
+  }
+
+  completeCodeCandidatePromotion(input: CompleteCodeCandidatePromotionInput): CodeCandidate {
+    const existing = this.codeCandidates.get(input.codeCandidateId);
+    if (existing === undefined) {
+      throw new Error(`Code candidate not found: ${input.codeCandidateId}`);
+    }
+    if (existing.status === "promoted" && existing.resultingCommitSha === input.resultingCommitSha) {
+      return existing;
+    }
+    const now = new Date().toISOString();
+    const updated: CodeCandidate = {
+      ...existing,
+      status: "promoted",
+      promotionRunId: input.promotionRunId,
+      resultingCommitSha: input.resultingCommitSha,
+      promotedAt: now,
+      ...touchTimestamps(existing, now),
+    };
+    this.codeCandidates.set(existing.id, updated);
+    return updated;
+  }
+
+  createPromotionRun(input: CreatePromotionRunInput): PromotionRun {
+    const existing = [...this.promotionRuns.values()].find(
+      (run) => run.codeCandidateId === input.codeCandidateId,
+    );
+    if (existing !== undefined) {
+      return existing;
+    }
+    const ts = createTimestamps();
+    const run: PromotionRun = {
+      id: input.id,
+      projectId: input.projectId,
+      codeCandidateId: input.codeCandidateId,
+      taskId: input.taskId,
+      workerRunId: input.workerRunId,
+      verifierRunId: input.verifierRunId,
+      destinationRepository: input.destinationRepository,
+      destinationRef: input.destinationRef,
+      baseCommitSha: input.baseCommitSha,
+      status: "pending",
+      ...ts,
+    };
+    this.promotionRuns.set(run.id, run);
+    return run;
+  }
+
+  getPromotionRun(id: EntityId): PromotionRun | undefined {
+    return this.promotionRuns.get(id);
+  }
+
+  getPromotionRunByCandidate(codeCandidateId: EntityId): PromotionRun | undefined {
+    return [...this.promotionRuns.values()].find((run) => run.codeCandidateId === codeCandidateId);
+  }
+
+  listPromotionRunsByProject(projectId: EntityId): readonly PromotionRun[] {
+    return [...this.promotionRuns.values()]
+      .filter((run) => run.projectId === projectId)
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  completePromotionRun(input: CompletePromotionRunInput): PromotionRun {
+    const existing = this.promotionRuns.get(input.promotionRunId);
+    if (existing === undefined) {
+      throw new Error(`Promotion run not found: ${input.promotionRunId}`);
+    }
+    if (existing.status === "succeeded" && input.status === "succeeded") {
+      return existing;
+    }
+    const now = new Date().toISOString();
+    const updated: PromotionRun = {
+      ...existing,
+      status: input.status,
+      ...(input.resultingCommitSha !== undefined ? { resultingCommitSha: input.resultingCommitSha } : {}),
+      ...(input.errorMessage !== undefined ? { errorMessage: input.errorMessage } : {}),
+      completedAt: now,
+      ...touchTimestamps(existing, now),
+    };
+    this.promotionRuns.set(existing.id, updated);
+    return updated;
   }
 }
 

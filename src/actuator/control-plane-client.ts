@@ -214,6 +214,55 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
       }
       return packet as WorkerTaskPacket;
     },
+
+
+    async getCodeCandidate(candidateId: string) {
+      const { payload } = await requestJsonGet(`/api/code-candidates/${encodeURIComponent(candidateId)}`);
+      const candidate = payload["candidate"];
+      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+        throw new ActuatorError("PROTOCOL_ERROR", "Code candidate response missing candidate");
+      }
+      return candidate as import("../domain/code-candidate.js").CodeCandidate;
+    },
+
+    async fetchCodeCandidatePatch(candidateId: string) {
+      let response: Response;
+      try {
+        response = await fetchImpl(`${base}/api/code-candidates/${encodeURIComponent(candidateId)}/patch`, {
+          method: "GET",
+          headers: {
+            authorization: `Bearer ${options.serviceToken}`,
+            accept: "text/x-patch",
+          },
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "network error";
+        throw new ActuatorError("NETWORK_ERROR", redactSecrets(message, secrets));
+      }
+      if (!response.ok) {
+        throw new ActuatorError("HTTP_ERROR", `Failed to fetch code candidate patch (${response.status})`, { status: response.status });
+      }
+      return await response.text();
+    },
+    async createCodeCandidate(input) {
+      const patchBase64 = Buffer.from(input.patchContent, "utf8").toString("base64");
+      await requestJson("POST", "/api/code-candidates", {
+        id: input.id,
+        projectId: input.projectId,
+        taskId: input.taskId,
+        workerRunId: input.workerRunId,
+        sourceRepository: input.sourceRepository,
+        ...(input.sourceRef !== undefined ? { sourceRef: input.sourceRef } : {}),
+        ...(input.parentCandidateId !== undefined ? { parentCandidateId: input.parentCandidateId } : {}),
+        baseCommitSha: input.baseCommitSha,
+        changedFiles: input.changedFiles,
+        patchChecksumSha256: input.patchChecksumSha256,
+        patchBase64,
+        testCommand: input.testCommand,
+        testExitCode: input.testExitCode,
+      });
+      return { id: input.id };
+    },
   };
 }
 

@@ -7,6 +7,8 @@ export interface TestCase extends Timestamps, StatusRecord<"active" | "disabled"
   readonly name: string;
   readonly description: string;
   readonly kind: TestCaseKind;
+  /** Deterministic browser spec JSON, without a trusted external target URL. */
+  readonly browserSpecJson?: string;
 }
 
 export interface TestResult extends Timestamps, Provenance {
@@ -26,6 +28,7 @@ export interface CreateTestCaseInput {
   readonly name: string;
   readonly description: string;
   readonly kind: TestCaseKind;
+  readonly browserSpecJson?: string;
 }
 
 export interface CreateTestResultInput {

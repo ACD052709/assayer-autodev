@@ -161,6 +161,7 @@ describe("runCodingTask", () => {
       succeed: vi.fn(),
       fail: vi.fn(),
       getTaskPacket: async () => samplePacket(),
+      createCodeCandidate: async (input) => ({ id: input.id }),
     };
     const result = await runCodingTask({
       workerRunId: WORKER_RUN_ID,
@@ -188,6 +189,7 @@ describe("runCodingTask", () => {
       succeed: vi.fn(),
       fail: vi.fn(),
       getTaskPacket: async () => samplePacket(),
+      createCodeCandidate: async (input) => ({ id: input.id }),
     };
     const result = await runCodingTask({
       workerRunId: WORKER_RUN_ID,
@@ -206,6 +208,12 @@ describe("runCodingTask", () => {
         async readPorcelain() {
           return " M README.md\n";
         },
+      },
+      gitCapture: {
+        async readRevParse() { return "a".repeat(40); },
+        async stageAll() {},
+        async readUnifiedDiff() { return "diff --git a/README.md b/README.md\n"; },
+        async readChangedPaths() { return ["README.md"]; },
       },
       process: {
         async run(input) {
@@ -266,6 +274,7 @@ describe("runActuator coding-task integration", () => {
         };
       },
       getTaskPacket: async () => samplePacket(),
+      createCodeCandidate: async (input) => ({ id: input.id }),
     };
 
     const actuatorPromise = runActuator({
