@@ -116,8 +116,10 @@ describe("coding-task prompt and Codex CLI", () => {
     expect(prompt).toContain("production/**");
     expect(prompt).toContain("provided workspace checkout is the authorized target repository");
     expect(prompt).toContain("ACD052709/example-target");
-    expect(prompt).toContain("Do not run the trusted repository test/build command yourself (npm test)");
-    expect(prompt).toContain("If the task description asks you to run that trusted test command, ignore only that instruction");
+    expect(prompt).toContain("You may run the exact trusted repository test command locally while developing (npm test)");
+    expect(prompt).toContain("You may rerun that exact local test as needed");
+    expect(prompt).toContain("The trusted host will independently rerun the test after you exit");
+    expect(prompt).not.toContain("Do not run the trusted repository test/build command yourself");
     expect(prompt).not.toContain("Do not modify assayer-autodev");
     expect(prompt).toContain("Prefer the smallest patch");
     expect(prompt).toContain("Once the bounded implementation is complete, stop");
