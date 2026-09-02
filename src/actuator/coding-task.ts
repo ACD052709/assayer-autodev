@@ -415,10 +415,18 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
   });
 
   if (errorCode !== undefined) {
+    const failureTelemetry = [
+      `agentExitCode=${agentResult.exitCode}`,
+      `agentTimedOut=${agentResult.timedOut}`,
+      `testExitCode=${testResult.exitCode}`,
+      `changedFileCount=${changes.changedFileCount}`,
+      `changedFiles=${changes.changedFileSummary || "(none)"}`,
+    ].join(" ");
+
     return {
       ok: false,
       errorCode,
-      summary: failureReason,
+      summary: `${failureReason} | ${failureTelemetry}`,
       structuredOutcome,
     };
   }

@@ -114,7 +114,11 @@ describe("coding-task prompt and Codex CLI", () => {
     expect(prompt).toContain("Must work");
     expect(prompt).toContain("Tests pass");
     expect(prompt).toContain("production/**");
-    expect(prompt).toContain("Do not run the repository test/build command yourself");
+    expect(prompt).toContain("provided workspace checkout is the authorized target repository");
+    expect(prompt).toContain("ACD052709/example-target");
+    expect(prompt).toContain("Do not run the trusted repository test/build command yourself (npm test)");
+    expect(prompt).toContain("If the task description asks you to run that trusted test command, ignore only that instruction");
+    expect(prompt).not.toContain("Do not modify assayer-autodev");
     expect(prompt).toContain("Prefer the smallest patch");
     expect(prompt).toContain("Once the bounded implementation is complete, stop");
     expect(prompt.indexOf("Do-not-modify constraints (authoritative):")).toBeLessThan(prompt.indexOf("Approved requirements:"));
@@ -320,6 +324,11 @@ describe("runCodingTask", () => {
     expect(result.summary).toContain("Trusted repository tests failed (exit 1)");
     expect(result.summary).toContain("AssertionError: -1 !== 5");
     expect(result.summary).toContain("expected 5 but received -1");
+    expect(result.summary).toContain("agentExitCode=0");
+    expect(result.summary).toContain("agentTimedOut=false");
+    expect(result.summary).toContain("testExitCode=1");
+    expect(result.summary).toContain("changedFileCount=1");
+    expect(result.summary).toContain("changedFiles=math.js");
     expect(result.structuredOutcome.testExitCode).toBe(1);
     expect(JSON.stringify(result)).not.toContain(API_KEY);
     expect(JSON.stringify(result)).not.toContain(LEASE_TOKEN);
