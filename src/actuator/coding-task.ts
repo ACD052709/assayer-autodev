@@ -334,9 +334,9 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
     description: usageAccountingEstimated ? `codex:${model}:estimated` : `codex:${model}`,
   });
 
-  const changes = await readCheckoutChanges(checkoutDir, input.gitStatus);
+  let changes = await readCheckoutChanges(checkoutDir, input.gitStatus);
   const trustedTest = parseTrustedTestCommand(packet.targetTestCommand);
-  const testResult = await input.process.run({
+  let testResult = await input.process.run({
     command: trustedTest.command,
     args: trustedTest.args,
     cwd: checkoutDir,
@@ -344,6 +344,104 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
     ...(input.signal !== undefined ? { signal: input.signal } : {}),
     env: sanitizedCandidateEnv(),
   });
+
+  // A worker must be able to repair its own implementation after deterministic
+  // host feedback. One initial Codex pass followed by immediate terminal failure
+  // made implementation tasks effectively single-shot.
+  //
+  // Give Codex one bounded repair pass in the SAME isolated checkout when the
+  // trusted repository test fails. The trusted host remains authoritative and
+  // reruns the exact test after the repair.
+  let finalAgentResult = agentResult;
+  let additionalEstimatedCostUsd = 0;
+
+  if (
+    testResult.exitCode !== 0 &&
+    !testResult.timedOut
+  ) {
+    const remainingAfterInitialAttempt =
+      budget.remainingHardLimit - estimatedCostUsd;
+
+    if (remainingAfterInitialAttempt >= reservationUsd) {
+      const testFeedback = summarizeTrustedTestFailure(
+        testResult.exitCode,
+        testResult.stdout,
+        testResult.stderr,
+      );
+
+      const repairPrompt = [
+        prompt,
+        "",
+        "TRUSTED HOST TEST FEEDBACK:",
+        testFeedback,
+        "",
+        "Your previous implementation did not pass the trusted host test.",
+        "Perform exactly one bounded repair pass in the current checkout.",
+        "Inspect the files relevant to this failure, correct the implementation,",
+        "and stop when the smallest appropriate repair is complete.",
+        "Do not push, deploy, alter secrets, or expand the task scope.",
+        "The trusted host will rerun the exact test after you exit.",
+      ].join("\n");
+
+      const repairInvocation = buildCodexCliInvocation({
+        workspaceDir: checkoutDir,
+        prompt: repairPrompt,
+        timeoutMs: input.codingTaskTimeoutMs,
+        model,
+      });
+
+      const repairAgentResult = await input.process.run({
+        command: repairInvocation.command,
+        args: repairInvocation.args,
+        cwd: repairInvocation.cwd,
+        timeoutMs: repairInvocation.timeoutMs,
+        ...(input.signal !== undefined ? { signal: input.signal } : {}),
+        env: {
+          ...sanitizedCandidateEnv(),
+          CODEX_API_KEY: input.openaiApiKey,
+        },
+      });
+
+      finalAgentResult = repairAgentResult;
+
+      const repairUsage = parseCodexUsage(repairAgentResult.stdout);
+      const repairUsageEstimated = repairUsage === undefined;
+
+      additionalEstimatedCostUsd =
+        repairUsage === undefined
+          ? reservationUsd
+          : computeCodingModelCostUsd(model, {
+              inputTokens: repairUsage.inputTokens,
+              cachedInputTokens: repairUsage.cachedInputTokens,
+              cacheWriteInputTokens: repairUsage.cacheWriteInputTokens,
+              outputTokens: repairUsage.outputTokens,
+            });
+
+      await recordBudgetEntry({
+        id: `budg-coding-repair-${input.workerRunId}`,
+        projectId: packet.projectId,
+        resourceType: CODING_COST_BUDGET_CATEGORY,
+        amount: additionalEstimatedCostUsd,
+        unit: "usd",
+        taskId: packet.taskId,
+        workerRunId: input.workerRunId,
+        description: repairUsageEstimated
+          ? `codex:${model}:repair:estimated`
+          : `codex:${model}:repair`,
+      });
+
+      changes = await readCheckoutChanges(checkoutDir, input.gitStatus);
+
+      testResult = await input.process.run({
+        command: trustedTest.command,
+        args: trustedTest.args,
+        cwd: checkoutDir,
+        timeoutMs: input.codingTaskTimeoutMs,
+        ...(input.signal !== undefined ? { signal: input.signal } : {}),
+        env: sanitizedCandidateEnv(),
+      });
+    }
+  }
 
   const durationMs = (input.now?.() ?? Date.now()) - startedAt;
   const testsPassed = testResult.exitCode === 0;
@@ -391,10 +489,10 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
       : agentResult.exitCode !== 0
         ? "CODEX_CLI_FAILED"
         : "NO_CODE_CHANGES";
-  } else if (agentResult.timedOut) {
+  } else if (finalAgentResult.timedOut) {
     // Passing changed work is preserved and sent to the independent verifier.
     failureReason = "Codex timed out after producing a passing candidate; candidate preserved";
-  } else if (agentResult.exitCode !== 0) {
+  } else if (finalAgentResult.exitCode !== 0) {
     failureReason = "Codex exited non-zero after producing a passing candidate; candidate preserved";
   } else if (usageAccountingEstimated) {
     failureReason = "Codex usage event missing; reservation charged conservatively";
@@ -403,11 +501,11 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
   const structuredOutcome = buildOutcome({
     model,
     ...(usage !== undefined ? { usage } : {}),
-    estimatedCostUsd,
+    estimatedCostUsd: estimatedCostUsd + additionalEstimatedCostUsd,
     usageAccountingEstimated,
     budgetReservationUsd: reservationUsd,
     budgetRemainingUsdBefore: budget.remainingHardLimit,
-    agentExitCode: agentResult.exitCode,
+    agentExitCode: finalAgentResult.exitCode,
     testExitCode: testResult.exitCode,
     changedFileCount: changes.changedFileCount,
     durationMs,

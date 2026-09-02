@@ -587,3 +587,125 @@ describe("runActuator coding-task integration", () => {
     expect(result.reason).toBe("succeeded");
   });
 });
+
+describe("coding-task trusted-test repair loop", () => {
+  it("repairs once after trusted host test failure and reruns the trusted test", async () => {
+    let codexCalls = 0;
+    let trustedTestCalls = 0;
+    const budgetEntries: Array<{ id: string; amount: number; description?: string }> = [];
+    const createdCandidates: unknown[] = [];
+
+    const result = await runCodingTask({
+      workerRunId: "wrun-iterative-repair-test",
+      leaseToken: "b".repeat(64),
+      workspaceRoot: "/tmp/work",
+      openaiApiKey: API_KEY,
+      codingTaskTimeoutMs: 5_000,
+
+      client: baseClient({
+        getTaskPacket: async () =>
+          samplePacket({
+            targetRepository: "ACD052709/assayer-autodev-coding-smoke",
+            targetRef: "main",
+            targetTestCommand: "node --test math.test.js",
+          }),
+
+        recordBudgetEntry: async (entry) => {
+          budgetEntries.push({
+            id: entry.id,
+            amount: entry.amount,
+            ...(entry.description !== undefined
+              ? { description: entry.description }
+              : {}),
+          });
+        },
+
+        createCodeCandidate: async (candidate) => {
+          createdCandidates.push(candidate);
+          return { id: candidate.id };
+        },
+      }),
+
+      git: {
+        run: async () => 0,
+      },
+
+      gitStatus: {
+        readPorcelain: async () => " M math.js\n",
+      },
+
+      gitCapture: {
+        async readRevParse() {
+          return "f".repeat(40);
+        },
+        async stageAll() {},
+        async readUnifiedDiff() {
+          return [
+            "diff --git a/math.js b/math.js",
+            "--- a/math.js",
+            "+++ b/math.js",
+            "@@ -1 +1 @@",
+            "-module.exports = { add: (a, b) => a - b };",
+            "+module.exports = { add: (a, b) => a + b };",
+            "",
+          ].join("\n");
+        },
+        async readChangedPaths() {
+          return ["math.js"];
+        },
+      },
+
+      process: {
+        async run(input) {
+          if (input.command === CODEX_CLI_COMMAND) {
+            codexCalls += 1;
+
+            return {
+              exitCode: 0,
+              stdout: CODEX_USAGE_JSONL,
+              stderr: "",
+              timedOut: false,
+            };
+          }
+
+          trustedTestCalls += 1;
+
+          if (trustedTestCalls === 1) {
+            return {
+              exitCode: 1,
+              stdout:
+                "AssertionError: Expected values to be strictly equal: -1 !== 5",
+              stderr: "",
+              timedOut: false,
+            };
+          }
+
+          return {
+            exitCode: 0,
+            stdout: "1..1\n# pass 1\n# fail 0",
+            stderr: "",
+            timedOut: false,
+          };
+        },
+      },
+
+      now: () => 0,
+    });
+
+    expect(codexCalls).toBe(2);
+    expect(trustedTestCalls).toBe(2);
+
+    expect(result.ok).toBe(true);
+    expect(result.structuredOutcome.testExitCode).toBe(0);
+    expect(result.structuredOutcome.changedFileCount).toBe(1);
+
+    expect(budgetEntries).toHaveLength(2);
+    expect(
+      budgetEntries.some((entry) =>
+        entry.description?.includes(":repair"),
+      ),
+    ).toBe(true);
+
+    expect(createdCandidates).toHaveLength(1);
+  });
+});
