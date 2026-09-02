@@ -215,6 +215,45 @@ export function createControlPlaneClient(options: ControlPlaneClientOptions): Co
       return packet as WorkerTaskPacket;
     },
 
+    async getBudget(projectId: string, budgetId: string) {
+      try {
+        const { payload } = await requestJsonGet(
+          `/api/projects/${encodeURIComponent(projectId)}/budgets/${encodeURIComponent(budgetId)}`,
+        );
+        const budget = asRecord(payload["budget"]);
+        if (budget === undefined) {
+          throw new ActuatorError("PROTOCOL_ERROR", "Budget response missing budget");
+        }
+        const hardLimit = numberField(budget, "hardLimit");
+        const consumedAmount = numberField(budget, "consumedAmount");
+        const remainingHardLimit = numberField(budget, "remainingHardLimit");
+        return {
+          resourceType: stringField(budget, "resourceType"),
+          unit: stringField(budget, "unit"),
+          hardLimit,
+          consumedAmount,
+          remainingHardLimit,
+        };
+      } catch (error) {
+        if (error instanceof ActuatorError && error.status === 404) {
+          return undefined;
+        }
+        throw error;
+      }
+    },
+
+    async recordBudgetEntry(input) {
+      await requestJson("POST", `/api/projects/${encodeURIComponent(input.projectId)}/budget-entries`, {
+        id: input.id,
+        resourceType: input.resourceType,
+        amount: input.amount,
+        unit: input.unit,
+        ...(input.taskId !== undefined ? { taskId: input.taskId } : {}),
+        ...(input.workerRunId !== undefined ? { workerRunId: input.workerRunId } : {}),
+        ...(input.description !== undefined ? { description: input.description } : {}),
+      });
+    },
+
 
     async getCodeCandidate(candidateId: string) {
       const { payload } = await requestJsonGet(`/api/code-candidates/${encodeURIComponent(candidateId)}`);
@@ -276,6 +315,14 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 function stringField(record: Record<string, unknown>, field: string): string {
   const value = record[field];
   if (typeof value !== "string" || value.length === 0) {
+    throw new ActuatorError("PROTOCOL_ERROR", `Control plane response missing ${field}`);
+  }
+  return value;
+}
+
+function numberField(record: Record<string, unknown>, field: string): number {
+  const value = record[field];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new ActuatorError("PROTOCOL_ERROR", `Control plane response missing ${field}`);
   }
   return value;

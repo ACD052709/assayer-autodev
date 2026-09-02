@@ -3,12 +3,13 @@ import type { CodeCandidate } from "../domain/code-candidate.js";
 import { verifyPatchChecksum } from "../security/checksum.js";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { isolatedCheckoutDirectory } from "./cursor-cli.js";
+import { isolatedCheckoutDirectory } from "./codex-cli.js";
+import { sanitizedCandidateEnv } from "./subprocess-env.js";
 import type { ProcessRunner } from "./process-runner.js";
 import { createSubprocessRunner } from "./process-runner.js";
 
 export interface GitRunner {
-  run(args: readonly string[], cwd?: string): Promise<number>;
+  run(args: readonly string[], cwd?: string, env?: NodeJS.ProcessEnv): Promise<number>;
 }
 
 export interface PrepareIsolatedCheckoutInput {
@@ -17,6 +18,7 @@ export interface PrepareIsolatedCheckoutInput {
   readonly git: GitRunner;
   readonly parentCandidate?: CodeCandidate;
   readonly parentPatchContent?: string;
+  readonly targetRepoReadToken?: string;
 }
 
 export interface PrepareIsolatedCheckoutResult {
@@ -25,6 +27,18 @@ export interface PrepareIsolatedCheckoutResult {
 
 export function buildCloneUrl(repository: string): string {
   return `https://github.com/${repository}.git`;
+}
+
+function targetRepoGitAuthEnv(token: string | undefined): NodeJS.ProcessEnv | undefined {
+  if (token === undefined || token.trim().length === 0) return undefined;
+  const basic = Buffer.from(`x-access-token:${token}`, "utf8").toString("base64");
+  return {
+    ...sanitizedCandidateEnv(),
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basic}`,
+    GIT_TERMINAL_PROMPT: "0",
+  };
 }
 
 export async function prepareIsolatedCheckout(
@@ -36,6 +50,7 @@ export async function prepareIsolatedCheckout(
   const checkoutDir = isolatedCheckoutDirectory(input.workspaceRoot, input.packet.workerRunId);
   await mkdir(dirname(checkoutDir), { recursive: true });
 
+  const gitAuthEnv = targetRepoGitAuthEnv(input.targetRepoReadToken);
   const parent = input.parentCandidate;
   if (parent !== undefined) {
     if (input.parentPatchContent === undefined) {
@@ -48,9 +63,17 @@ export async function prepareIsolatedCheckout(
       throw new Error("Parent candidate patch checksum mismatch");
     }
 
-    let exitCode = await input.git.run(["clone", "--no-checkout", buildCloneUrl(input.packet.targetRepository), checkoutDir]);
+    let exitCode = await input.git.run(
+      ["clone", "--no-checkout", buildCloneUrl(input.packet.targetRepository), checkoutDir],
+      undefined,
+      gitAuthEnv,
+    );
     if (exitCode !== 0) throw new Error("Failed to clone target repository checkout");
-    exitCode = await input.git.run(["fetch", "--depth", "1", "origin", parent.baseCommitSha], checkoutDir);
+    exitCode = await input.git.run(
+      ["fetch", "--depth", "1", "origin", parent.baseCommitSha],
+      checkoutDir,
+      gitAuthEnv,
+    );
     if (exitCode !== 0) throw new Error("Failed to fetch parent candidate base commit");
     exitCode = await input.git.run(["checkout", "--detach", parent.baseCommitSha], checkoutDir);
     if (exitCode !== 0) throw new Error("Failed to checkout parent candidate base commit");
@@ -73,7 +96,7 @@ export async function prepareIsolatedCheckout(
     cloneArgs.push("--branch", input.packet.targetRef);
   }
   cloneArgs.push(buildCloneUrl(input.packet.targetRepository), checkoutDir);
-  const exitCode = await input.git.run(cloneArgs);
+  const exitCode = await input.git.run(cloneArgs, undefined, gitAuthEnv);
   if (exitCode !== 0) {
     throw new Error("Failed to clone target repository checkout");
   }
@@ -186,12 +209,13 @@ export function createGitCaptureReader(runner: ProcessRunner = createSubprocessR
 
 export function createGitRunner(runner: ProcessRunner = createSubprocessRunner()): GitRunner {
   return {
-    async run(args, cwd) {
+    async run(args, cwd, env) {
       const result = await runner.run({
         command: "git",
         args,
         cwd: cwd ?? process.cwd(),
         timeoutMs: 600_000,
+        ...(env !== undefined ? { env } : {}),
       });
       return result.exitCode;
     },

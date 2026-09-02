@@ -23,7 +23,7 @@ import { asAsyncStore, createInMemoryStateStore } from "../src/state/index.js";
 const PROJECT_ID = "proj-orchestrator";
 const IMPL_TASK_ID = "task-impl";
 const TEST_TOKEN = "orch-token";
-const THRESHOLDS = { ...DEFAULT_ORCHESTRATION_THRESHOLDS, maxRepairAttemptsPerTask: 2 };
+const THRESHOLDS = { ...DEFAULT_ORCHESTRATION_THRESHOLDS, maxRepairAttemptsPerTask: 3 };
 
 type SyncStore = ReturnType<typeof createInMemoryStateStore>;
 
@@ -497,6 +497,30 @@ describe("AutoDev orchestration loop", () => {
 
     await syntheticWorkerSuccess(harness, repair2!.id);
 
+    await runOrchestrationCycle(
+      PROJECT_ID,
+      {
+        store: harness.store,
+        verifierAdapter: adapter(),
+        idFactory: harness.ids,
+        taskDispatcher: harness.taskDispatcher,
+      },
+      {
+        runMasterReevaluation: false,
+        runAudit: false,
+        thresholds: THRESHOLDS,
+      },
+    );
+
+    const repair3 = harness.syncStore
+      .listTasksByProject(PROJECT_ID)
+      .find((task) => task.id === `task-repair-${IMPL_TASK_ID}-3`);
+
+    expect(repair3).toBeDefined();
+    expect(parseRepairTaskContext(repair3!.description)?.attempt).toBe(3);
+
+    await syntheticWorkerSuccess(harness, repair3!.id);
+
     const exhaustCycle = await runOrchestrationCycle(
       PROJECT_ID,
       {
@@ -534,7 +558,7 @@ describe("AutoDev orchestration loop", () => {
           IMPL_TASK_ID,
       ).length;
 
-    expect(repairCount).toBe(2);
+    expect(repairCount).toBe(3);
 
     await runOrchestrationCycle(
       PROJECT_ID,
@@ -559,7 +583,7 @@ describe("AutoDev orchestration loop", () => {
             parseRepairTaskContext(task.description)?.originalTaskId ===
             IMPL_TASK_ID,
         ).length,
-    ).toBe(2);
+    ).toBe(3);
   });
 
   it("D. idempotency: rerun cycle on unchanged state creates no duplicate work", async () => {

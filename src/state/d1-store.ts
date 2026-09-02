@@ -13,6 +13,7 @@ import type {
   CreateBlockerInput,
   CreateBudgetEntryInput,
   AddBudgetResourceInput,
+  IncreaseBudgetResourceInput,
   CreateDefinitionOfDoneInput,
   CreateDeploymentInput,
   CreateEvidenceInput,
@@ -2632,6 +2633,33 @@ export class D1StateStore implements AsyncStateStore {
     const updated: BudgetLedger = {
       ...existing,
       limits: [...existing.limits, ...limitsForBudgetResource(input)],
+      ...touchTimestamps(existing),
+    };
+    await this.db
+      .prepare(`UPDATE budget_ledger SET limits_json = ?, updated_at = ? WHERE project_id = ?`)
+      .bind(toJson(updated.limits), updated.updatedAt, input.projectId)
+      .run();
+    return updated;
+  }
+
+  async increaseBudgetResource(input: IncreaseBudgetResourceInput): Promise<BudgetLedger> {
+    const existing = await this.getBudgetLedger(input.projectId);
+    if (existing === undefined) {
+      throw new Error(`BudgetLedger not found for project: ${input.projectId}`);
+    }
+    const hard = existing.limits.find(
+      (limit) => limit.category === input.resourceType && limit.kind === "hard",
+    );
+    if (hard === undefined) {
+      throw new Error(`Budget resource not found: ${input.resourceType}`);
+    }
+    const updated: BudgetLedger = {
+      ...existing,
+      limits: existing.limits.map((limit) =>
+        limit.category === input.resourceType && limit.kind === "hard"
+          ? { ...limit, maxAmount: limit.maxAmount + input.additionalAmount }
+          : limit,
+      ),
       ...touchTimestamps(existing),
     };
     await this.db

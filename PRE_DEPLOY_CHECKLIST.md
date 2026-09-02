@@ -33,9 +33,15 @@ A failure in any stage blocks deployment.
 
 The hardened source contains migrations through `0008_candidate_lineage_verification.sql`. Apply only migrations that are not already present in the dedicated AutoDev D1 database. Do not apply these migrations to an Assayer product database.
 
-## 5. Confirm credential boundaries
+## 5. Confirm credential and coding-budget boundaries
 
 Required runtime credentials belong in their existing secret stores, not source files. Never put token values in `.env.example`, workflow YAML, README files, or committed configuration.
+
+The implementation workflow requires the GitHub Actions repository secret `OPENAI_API_KEY`. It is passed only to the trusted actuator step and then to Codex as `CODEX_API_KEY`; repository-controlled tests/builds receive a sanitized environment. Keep the old `CURSOR_API_KEY` secret only until the Codex smoke passes, then it can be removed.
+
+Before any `coding-task` dispatch, create a project `llm_cost_usd` budget (unit `usd`). For disposable validation, use a deliberately small hard limit and confirm orchestration returns `waiting_for_budget` when the remaining headroom is below the next model reservation. Increasing `/budgets/llm_cost_usd/increase` must preserve consumed spend and all project state. For the first proof, do not issue concurrent manual dispatch/orchestrate requests; the active-run reservation gate is intentionally not yet a single cross-request atomic D1 reservation.
+
+Confirm the implementation workflow pins Codex 0.148.0, uses standard service tier, five-minute coding timeout, workspace-write/no-network sandboxing, approval mode `never`, and disables fast/multi-agent/code-mode-host features.
 
 Implementation, browser verification, and promotion remain separate workflow roles. The browser verifier must not receive implementation-agent credentials, and candidate-controlled subprocesses must not inherit AutoDev secrets.
 

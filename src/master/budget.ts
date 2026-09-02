@@ -46,3 +46,25 @@ export function authorizeLlmBudget(
   }
   return { allowed: true, remaining: hard.maxAmount - usage, estimatedTokens };
 }
+
+export const DEFAULT_MASTER_CALL_COST_RESERVE_USD = 0.1;
+
+export function authorizeOptionalLlmCostBudget(
+  ledger: BudgetLedger | undefined,
+  estimatedUsd = DEFAULT_MASTER_CALL_COST_RESERVE_USD,
+): { readonly allowed: true; readonly remaining: number } | { readonly allowed: false; readonly reason: string } {
+  if (ledger === undefined) {
+    return { allowed: true, remaining: Number.POSITIVE_INFINITY };
+  }
+  const hard = ledger.limits.find((limit) => limit.category === "llm_cost_usd" && limit.kind === "hard");
+  if (hard === undefined) {
+    return { allowed: true, remaining: Number.POSITIVE_INFINITY };
+  }
+  const usage = ledger.entries
+    .filter((entry) => entry.category === "llm_cost_usd")
+    .reduce((sum, entry) => sum + entry.amount, 0);
+  if (usage + estimatedUsd > hard.maxAmount) {
+    return { allowed: false, reason: "cost_hard_limit_exceeded" };
+  }
+  return { allowed: true, remaining: hard.maxAmount - usage };
+}

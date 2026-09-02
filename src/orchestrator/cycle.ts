@@ -76,6 +76,13 @@ export async function runOrchestrationCycle(
   const dispatchResult = await dispatcher.dispatch(projectId, {
     maxAssignments: thresholds.maxDispatchAssignments,
   });
+  if (dispatchResult.budgetBlocked !== undefined) {
+    actions.push({
+      kind: "budget_wait",
+      summary: `Coding work paused for budget (${dispatchResult.budgetBlocked.reason})`,
+      details: { ...dispatchResult.budgetBlocked },
+    });
+  }
   if (dispatchResult.assignments.length > 0) {
     for (const assignment of dispatchResult.assignments) {
       const launch = dispatchResult.launches.find(
@@ -238,7 +245,12 @@ export async function runOrchestrationCycle(
     }
   }
 
-  const phase = deriveOrchestrationPhase(input);
+  const derivedPhase = deriveOrchestrationPhase(input);
+  const phase =
+    dispatchResult.budgetBlocked !== undefined &&
+    (derivedPhase === "awaiting_work" || derivedPhase === "repair_required")
+      ? "waiting_for_budget"
+      : derivedPhase;
   return {
     projectId,
     evaluatedAt: now,

@@ -9,6 +9,12 @@ import type {
 import type { IdFactory } from "../master/ids.js";
 import { createRandomIdFactory } from "../master/ids.js";
 import type { AsyncStateStore } from "../state/async-store.js";
+import { toBudgetResourceView } from "../domain/budget.js";
+import {
+  CODING_COST_BUDGET_CATEGORY,
+  codingAttemptReservationUsd,
+  selectCodingModelForTask,
+} from "../domain/coding-model.js";
 import type { WorkerLaunchBridge, WorkerLaunchRecord } from "./github-launch-bridge.js";
 import { NOOP_WORKER_LAUNCH_BRIDGE } from "./github-launch-bridge.js";
 import {
@@ -27,15 +33,25 @@ export interface WorkerDispatcherOptions {
   readonly idFactory?: IdFactory;
   readonly workerKind?: WorkerKind;
   readonly launchBridge?: WorkerLaunchBridge;
+  /** Require project llm_cost_usd headroom before assigning implementation workers. */
+  readonly codingBudgetGate?: boolean;
 }
 
 export interface DispatchRequest {
   readonly maxAssignments?: number;
 }
 
+export interface DispatchBudgetBlock {
+  readonly resourceType: typeof CODING_COST_BUDGET_CATEGORY;
+  readonly reason: "budget_unavailable" | "insufficient_remaining_budget";
+  readonly remainingAmount: number;
+  readonly requiredAmount: number;
+}
+
 export interface DispatchResult {
   readonly assignments: readonly TaskWorkerAssignment[];
   readonly launches: readonly WorkerLaunchRecord[];
+  readonly budgetBlocked?: DispatchBudgetBlock;
 }
 
 export interface PersistWorkerReportResult {
@@ -93,12 +109,14 @@ export class WorkerDispatcher {
   private readonly ids: IdFactory;
   private readonly workerKind: WorkerKind;
   private readonly launchBridge: WorkerLaunchBridge;
+  private readonly codingBudgetGate: boolean;
 
   constructor(options: WorkerDispatcherOptions) {
     this.store = options.store;
     this.ids = options.idFactory ?? createRandomIdFactory();
     this.workerKind = options.workerKind ?? DISPATCH_WORKER_KIND;
     this.launchBridge = options.launchBridge ?? NOOP_WORKER_LAUNCH_BRIDGE;
+    this.codingBudgetGate = options.codingBudgetGate ?? false;
   }
 
   async dispatch(projectId: EntityId, request: DispatchRequest = {}): Promise<DispatchResult> {
@@ -115,7 +133,50 @@ export class WorkerDispatcher {
     const eligible = tasks
       .filter((task) => isTaskEligibleForDispatch(task, depsByTaskId.get(task.id) ?? [], tasksById))
       .sort(compareTasksForDispatch);
-    const selected = selectIndependentEligibleTasks(eligible, depsByTaskId, maxAssignments);
+    const independentlySelected = selectIndependentEligibleTasks(eligible, depsByTaskId, maxAssignments);
+
+    let selected = independentlySelected;
+    let budgetBlocked: DispatchBudgetBlock | undefined;
+    if (this.codingBudgetGate && independentlySelected.length > 0) {
+      const ledger = await this.store.getBudgetLedger(projectId);
+      const budget = ledger === undefined ? undefined : toBudgetResourceView(ledger, CODING_COST_BUDGET_CATEGORY);
+      if (budget === undefined) {
+        const firstModel = selectCodingModelForTask(independentlySelected[0]!);
+        budgetBlocked = {
+          resourceType: CODING_COST_BUDGET_CATEGORY,
+          reason: "budget_unavailable",
+          remainingAmount: 0,
+          requiredAmount: codingAttemptReservationUsd(firstModel),
+        };
+        selected = [];
+      } else {
+        const runs = await this.store.listWorkerRunsByProject(projectId);
+        let available = budget.remainingHardLimit;
+        for (const run of runs) {
+          if ((run.status !== "queued" && run.status !== "running") || run.taskId === undefined) continue;
+          const activeTask = tasksById.get(run.taskId);
+          if (activeTask === undefined) continue;
+          available = Math.max(0, available - codingAttemptReservationUsd(selectCodingModelForTask(activeTask)));
+        }
+
+        const withinBudget: typeof independentlySelected = [];
+        for (const task of independentlySelected) {
+          const required = codingAttemptReservationUsd(selectCodingModelForTask(task));
+          if (available + 1e-12 >= required) {
+            withinBudget.push(task);
+            available -= required;
+          } else if (budgetBlocked === undefined) {
+            budgetBlocked = {
+              resourceType: CODING_COST_BUDGET_CATEGORY,
+              reason: "insufficient_remaining_budget",
+              remainingAmount: available,
+              requiredAmount: required,
+            };
+          }
+        }
+        selected = withinBudget;
+      }
+    }
 
     const assignments: TaskWorkerAssignment[] = [];
     const claimedTaskIds = new Set<EntityId>();
@@ -141,7 +202,7 @@ export class WorkerDispatcher {
       assignments.map((assignment) => this.launchBridge.launch(assignment.workerRun.id)),
     );
 
-    return { assignments, launches };
+    return { assignments, launches, ...(budgetBlocked !== undefined ? { budgetBlocked } : {}) };
   }
 
   /**

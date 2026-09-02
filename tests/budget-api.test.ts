@@ -190,3 +190,70 @@ describe("Budget API", () => {
     expect(body.run.finishedBlockedReasons).toContain("budget_unavailable");
   });
 });
+
+describe("Dollar budget checkpoint API", () => {
+  it("creates, charges, and increases llm_cost_usd without losing prior usage", async () => {
+    const { router } = createHarness();
+    await request(router, "POST", "/api/projects", {
+      id: "proj-dollar-budget",
+      name: "Dollar budget",
+      description: "Checkpoint spending",
+    });
+
+    const created = await request(router, "POST", "/api/projects/proj-dollar-budget/budgets", {
+      resourceType: "llm_cost_usd",
+      hardLimit: 10,
+      softLimit: 8,
+      unit: "usd",
+    });
+    expect(created.status).toBe(201);
+
+    const charged = await request(router, "POST", "/api/projects/proj-dollar-budget/budget-entries", {
+      id: "budg-coding-run-1",
+      resourceType: "llm_cost_usd",
+      amount: 1.25,
+      unit: "usd",
+      description: "codex:gpt-5.6-luna",
+    });
+    expect(charged.status).toBe(201);
+
+    const replay = await request(router, "POST", "/api/projects/proj-dollar-budget/budget-entries", {
+      id: "budg-coding-run-1",
+      resourceType: "llm_cost_usd",
+      amount: 1.25,
+      unit: "usd",
+      description: "codex:gpt-5.6-luna",
+    });
+    expect(replay.status).toBe(200);
+    expect((await replay.json() as { created: boolean }).created).toBe(false);
+
+    const increased = await request(
+      router,
+      "POST",
+      "/api/projects/proj-dollar-budget/budgets/llm_cost_usd/increase",
+      { additionalAmount: 5 },
+    );
+    expect(increased.status).toBe(200);
+    const body = (await increased.json()) as {
+      budget: { hardLimit: number; consumedAmount: number; remainingHardLimit: number };
+    };
+    expect(body.budget.hardLimit).toBe(15);
+    expect(body.budget.consumedAmount).toBe(1.25);
+    expect(body.budget.remainingHardLimit).toBe(13.75);
+  });
+
+  it("rejects the wrong unit for llm_cost_usd", async () => {
+    const { router } = createHarness();
+    await request(router, "POST", "/api/projects", {
+      id: "proj-dollar-unit",
+      name: "Dollar unit",
+      description: "Unit validation",
+    });
+    const res = await request(router, "POST", "/api/projects/proj-dollar-unit/budgets", {
+      resourceType: "llm_cost_usd",
+      hardLimit: 10,
+      unit: "tokens",
+    });
+    expect(res.status).toBe(400);
+  });
+});

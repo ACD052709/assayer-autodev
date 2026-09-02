@@ -21,11 +21,12 @@ export { runActuator, defaultSleep } from "./executor.js";
 export { runCodingTask } from "./coding-task.js";
 export { buildCodingTaskPrompt } from "./coding-task-prompt.js";
 export {
-  buildCursorCliInvocation,
-  CURSOR_CLI_COMMAND,
+  buildCodexCliInvocation,
+  CODEX_CLI_COMMAND,
+  parseCodexUsage,
   isolatedCheckoutDirectory,
   parseTrustedTestCommand,
-} from "./cursor-cli.js";
+} from "./codex-cli.js";
 export {
   buildCloneUrl,
   prepareIsolatedCheckout,
@@ -36,3 +37,5 @@ export { runSyntheticNoop } from "./synthetic-noop.js";
 export { startHeartbeatLoop } from "./heartbeat-loop.js";
 export { ActuatorError } from "./errors.js";
 export { redactSecrets } from "./sanitize.js";
+
+export * from "./target-setup.js";

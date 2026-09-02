@@ -19,7 +19,8 @@ export interface CliEnv {
   readonly GITHUB_RUN_ATTEMPT?: string;
   readonly AUTODEV_WORKSPACE_ROOT?: string;
   readonly AUTODEV_CODING_TASK_TIMEOUT_MS?: string;
-  readonly CURSOR_API_KEY?: string;
+  readonly OPENAI_API_KEY?: string;
+  readonly AUTODEV_TARGET_REPO_READ_TOKEN?: string;
 }
 
 const ALLOWED_FLAGS = new Set(["--worker-run-id", "--execution-mode"]);
@@ -84,7 +85,10 @@ export function parseActuatorCli(argv: string[], env: CliEnv): ActuatorConfig {
     syntheticNoopDurationMs: DEFAULT_SYNTHETIC_NOOP_DURATION_MS,
     workspaceRoot: env.AUTODEV_WORKSPACE_ROOT?.trim() || DEFAULT_WORKSPACE_ROOT,
     codingTaskTimeoutMs: parsePositiveInt(env.AUTODEV_CODING_TASK_TIMEOUT_MS, DEFAULT_CODING_TASK_TIMEOUT_MS),
-    ...(env.CURSOR_API_KEY?.trim() ? { cursorApiKey: env.CURSOR_API_KEY.trim() } : {}),
+    ...(env.OPENAI_API_KEY?.trim() ? { openaiApiKey: env.OPENAI_API_KEY.trim() } : {}),
+    ...(env.AUTODEV_TARGET_REPO_READ_TOKEN?.trim()
+      ? { targetRepoReadToken: env.AUTODEV_TARGET_REPO_READ_TOKEN.trim() }
+      : {}),
   };
 }
 

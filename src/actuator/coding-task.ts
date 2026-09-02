@@ -1,5 +1,12 @@
 import type { WorkerTaskPacket } from "../domain/worker-task-packet.js";
 import { codeCandidateIdForWorkerRun } from "../domain/code-candidate.js";
+import {
+  CODING_COST_BUDGET_CATEGORY,
+  codingAttemptReservationUsd,
+  computeCodingModelCostUsd,
+  selectCodingModelForTask,
+  type CodingModelId,
+} from "../domain/coding-model.js";
 import { sha256Hex } from "../security/checksum.js";
 import { ActuatorError } from "./errors.js";
 import { buildCodingTaskPrompt } from "./coding-task-prompt.js";
@@ -11,17 +18,24 @@ import {
   type GitRunner,
   type GitStatusReader,
 } from "./coding-task-checkout.js";
-import { buildCursorCliInvocation, parseTrustedTestCommand } from "./cursor-cli.js";
+import {
+  buildCodexCliInvocation,
+  parseCodexUsage,
+  parseTrustedTestCommand,
+  type CodexUsage,
+} from "./codex-cli.js";
 import type { ProcessRunner } from "./process-runner.js";
 import type { ControlPlaneClient } from "./types.js";
 import { CODING_TASK_KIND } from "./types.js";
 import { sanitizedCandidateEnv } from "./subprocess-env.js";
+import { detectTargetSetupCommand } from "./target-setup.js";
 
 export interface CodingTaskRunInput {
   readonly workerRunId: string;
   readonly leaseToken: string;
   readonly workspaceRoot: string;
-  readonly cursorApiKey?: string;
+  readonly openaiApiKey?: string;
+  readonly targetRepoReadToken?: string;
   readonly codingTaskTimeoutMs: number;
   readonly client: ControlPlaneClient;
   readonly process: ProcessRunner;
@@ -34,13 +48,19 @@ export interface CodingTaskRunInput {
 
 export interface CodingTaskStructuredOutcome extends Readonly<Record<string, string | number | boolean>> {
   readonly kind: typeof CODING_TASK_KIND;
-  readonly codingAgentUsed: true;
-  readonly externalRepositoryModified: boolean;
+  readonly codingAgent: "codex";
+  readonly codingModel: CodingModelId;
   readonly agentExitCode: number;
-  readonly testCommand: string;
   readonly testExitCode: number;
   readonly changedFileCount: number;
-  readonly changedFileSummary: string;
+  readonly inputTokens: number;
+  readonly cachedInputTokens: number;
+  readonly cacheWriteInputTokens: number;
+  readonly outputTokens: number;
+  readonly estimatedCostUsd: number;
+  readonly usageAccountingEstimated: boolean;
+  readonly budgetReservationUsd: number;
+  readonly budgetRemainingUsdBefore: number;
   readonly durationMs: number;
   readonly failureReason: string;
 }
@@ -57,59 +77,136 @@ function sanitizeFailureReason(value: string): string {
   return trimmed.length > 240 ? trimmed.slice(0, 240) : trimmed;
 }
 
+const ZERO_USAGE: CodexUsage = {
+  inputTokens: 0,
+  cachedInputTokens: 0,
+  cacheWriteInputTokens: 0,
+  outputTokens: 0,
+  reasoningOutputTokens: 0,
+};
+
 function buildOutcome(input: {
-  packet: WorkerTaskPacket;
-  testCommand: string;
+  model: CodingModelId;
+  usage?: CodexUsage;
+  estimatedCostUsd?: number;
+  budgetReservationUsd: number;
+  budgetRemainingUsdBefore: number;
   agentExitCode: number;
   testExitCode: number;
   changedFileCount: number;
-  changedFileSummary: string;
   durationMs: number;
   failureReason: string;
+  usageAccountingEstimated?: boolean;
 }): CodingTaskStructuredOutcome {
+  const usage = input.usage ?? ZERO_USAGE;
   return {
     kind: CODING_TASK_KIND,
-    codingAgentUsed: true,
-    externalRepositoryModified: input.changedFileCount > 0,
+    codingAgent: "codex",
+    codingModel: input.model,
     agentExitCode: input.agentExitCode,
-    testCommand: input.testCommand,
     testExitCode: input.testExitCode,
     changedFileCount: input.changedFileCount,
-    changedFileSummary: input.changedFileSummary,
+    inputTokens: usage.inputTokens,
+    cachedInputTokens: usage.cachedInputTokens,
+    cacheWriteInputTokens: usage.cacheWriteInputTokens,
+    outputTokens: usage.outputTokens,
+    estimatedCostUsd: input.estimatedCostUsd ?? 0,
+    usageAccountingEstimated: input.usageAccountingEstimated ?? false,
+    budgetReservationUsd: input.budgetReservationUsd,
+    budgetRemainingUsdBefore: input.budgetRemainingUsdBefore,
     durationMs: input.durationMs,
     failureReason: sanitizeFailureReason(input.failureReason),
+  };
+}
+
+function budgetFailure(input: {
+  packet: WorkerTaskPacket;
+  model: CodingModelId;
+  reservationUsd: number;
+  remainingUsd: number;
+  startedAt: number;
+  now?: () => number;
+  reason: string;
+}): CodingTaskRunResult {
+  const durationMs = (input.now?.() ?? Date.now()) - input.startedAt;
+  return {
+    ok: false,
+    errorCode: "CODING_BUDGET_REQUIRED",
+    summary: input.reason,
+    structuredOutcome: buildOutcome({
+      model: input.model,
+      budgetReservationUsd: input.reservationUsd,
+      budgetRemainingUsdBefore: input.remainingUsd,
+      agentExitCode: -1,
+      testExitCode: -1,
+      changedFileCount: 0,
+      durationMs,
+      failureReason: input.reason,
+    }),
   };
 }
 
 export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTaskRunResult> {
   const startedAt = input.now?.() ?? Date.now();
   const packet = await input.client.getTaskPacket(input.workerRunId, input.leaseToken);
+  const model = selectCodingModelForTask(packet.task);
+  const reservationUsd = codingAttemptReservationUsd(model);
 
-  if (input.cursorApiKey === undefined || input.cursorApiKey.trim().length === 0) {
+  if (input.openaiApiKey === undefined || input.openaiApiKey.trim().length === 0) {
     const durationMs = (input.now?.() ?? Date.now()) - startedAt;
-    const testCommand = packet.targetTestCommand ?? "";
     return {
       ok: false,
-      errorCode: "CURSOR_API_KEY_MISSING",
-      summary: "CURSOR_API_KEY is required for coding-task execution",
+      errorCode: "OPENAI_API_KEY_MISSING",
+      summary: "OPENAI_API_KEY is required for Codex coding-task execution",
       structuredOutcome: buildOutcome({
-        packet,
-        testCommand,
+        model,
+        budgetReservationUsd: reservationUsd,
+        budgetRemainingUsdBefore: 0,
         agentExitCode: -1,
         testExitCode: -1,
         changedFileCount: 0,
-        changedFileSummary: "",
         durationMs,
-        failureReason: "CURSOR_API_KEY is not configured",
+        failureReason: "OPENAI_API_KEY is not configured",
       }),
     };
   }
+
+  if (input.client.getBudget === undefined || input.client.recordBudgetEntry === undefined) {
+    throw new ActuatorError("invalid_config", "Control-plane budget methods are required for coding-task execution");
+  }
+
+  const getBudget = input.client.getBudget.bind(input.client);
+  const recordBudgetEntry = input.client.recordBudgetEntry.bind(input.client);
 
   if (packet.targetRepository === undefined) {
     throw new ActuatorError("invalid_config", "Task packet is missing targetRepository");
   }
   if (packet.targetTestCommand === undefined || packet.targetTestCommand.trim().length === 0) {
     throw new ActuatorError("invalid_config", "Task packet is missing targetTestCommand");
+  }
+
+  const budget = await getBudget(packet.projectId, CODING_COST_BUDGET_CATEGORY);
+  if (budget === undefined || budget.unit !== "usd") {
+    return budgetFailure({
+      packet,
+      model,
+      reservationUsd,
+      remainingUsd: 0,
+      startedAt,
+      ...(input.now !== undefined ? { now: input.now } : {}),
+      reason: "Coding budget is not configured; increase or create llm_cost_usd budget to continue",
+    });
+  }
+  if (budget.remainingHardLimit + 1e-12 < reservationUsd) {
+    return budgetFailure({
+      packet,
+      model,
+      reservationUsd,
+      remainingUsd: budget.remainingHardLimit,
+      startedAt,
+      ...(input.now !== undefined ? { now: input.now } : {}),
+      reason: `Coding budget has $${budget.remainingHardLimit.toFixed(4)} remaining; $${reservationUsd.toFixed(2)} headroom is required for ${model}`,
+    });
   }
 
   let parentCandidate: import("../domain/code-candidate.js").CodeCandidate | undefined;
@@ -128,12 +225,49 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
     git: input.git,
     ...(parentCandidate !== undefined ? { parentCandidate } : {}),
     ...(parentPatchContent !== undefined ? { parentPatchContent } : {}),
+    ...(input.targetRepoReadToken !== undefined ? { targetRepoReadToken: input.targetRepoReadToken } : {}),
   });
+  const setup = await detectTargetSetupCommand(checkoutDir);
+  if (setup !== undefined) {
+    const setupResult = await input.process.run({
+      command: setup.command,
+      args: setup.args,
+      cwd: checkoutDir,
+      timeoutMs: Math.min(input.codingTaskTimeoutMs, 300_000),
+      ...(input.signal !== undefined ? { signal: input.signal } : {}),
+      env: sanitizedCandidateEnv(),
+    });
+    if (setupResult.exitCode !== 0 || setupResult.timedOut) {
+      const durationMs = (input.now?.() ?? Date.now()) - startedAt;
+      const failureReason = setupResult.timedOut
+        ? `Trusted target dependency setup timed out (${setup.reason})`
+        : `Trusted target dependency setup failed (${setup.reason})`;
+      return {
+        ok: false,
+        errorCode: setupResult.timedOut ? "TARGET_SETUP_TIMEOUT" : "TARGET_SETUP_FAILED",
+        summary: failureReason,
+        structuredOutcome: buildOutcome({
+          model,
+          estimatedCostUsd: 0,
+          usageAccountingEstimated: false,
+          budgetReservationUsd: reservationUsd,
+          budgetRemainingUsdBefore: budget.remainingHardLimit,
+          agentExitCode: -1,
+          testExitCode: -1,
+          changedFileCount: 0,
+          durationMs,
+          failureReason,
+        }),
+      };
+    }
+  }
+
   const prompt = buildCodingTaskPrompt(packet);
-  const invocation = buildCursorCliInvocation({
+  const invocation = buildCodexCliInvocation({
     workspaceDir: checkoutDir,
     prompt,
     timeoutMs: input.codingTaskTimeoutMs,
+    model,
   });
 
   const agentResult = await input.process.run({
@@ -144,8 +278,33 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
     ...(input.signal !== undefined ? { signal: input.signal } : {}),
     env: {
       ...sanitizedCandidateEnv(),
-      CURSOR_API_KEY: input.cursorApiKey,
+      CODEX_API_KEY: input.openaiApiKey,
     },
+  });
+
+  const usage = parseCodexUsage(agentResult.stdout);
+  // If Codex is interrupted before emitting its terminal usage event, charge the
+  // reservation internally rather than silently undercounting. This is deliberately
+  // conservative: the budget can be increased later without losing project state.
+  const usageAccountingEstimated = usage === undefined;
+  const estimatedCostUsd = usage === undefined
+    ? reservationUsd
+    : computeCodingModelCostUsd(model, {
+        inputTokens: usage.inputTokens,
+        cachedInputTokens: usage.cachedInputTokens,
+        cacheWriteInputTokens: usage.cacheWriteInputTokens,
+        outputTokens: usage.outputTokens,
+      });
+
+  await recordBudgetEntry({
+    id: `budg-coding-${input.workerRunId}`,
+    projectId: packet.projectId,
+    resourceType: CODING_COST_BUDGET_CATEGORY,
+    amount: estimatedCostUsd,
+    unit: "usd",
+    taskId: packet.taskId,
+    workerRunId: input.workerRunId,
+    description: usageAccountingEstimated ? `codex:${model}:estimated` : `codex:${model}`,
   });
 
   const changes = await readCheckoutChanges(checkoutDir, input.gitStatus);
@@ -160,40 +319,13 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
   });
 
   const durationMs = (input.now?.() ?? Date.now()) - startedAt;
-  let failureReason = "";
-  if (agentResult.timedOut) {
-    failureReason = "Cursor CLI execution timed out";
-  } else if (agentResult.exitCode !== 0) {
-    failureReason = "Cursor CLI exited with a non-zero status";
-  } else if (testResult.exitCode !== 0) {
-    failureReason = "Trusted repository tests failed";
-  }
+  const testsPassed = testResult.exitCode === 0;
+  const hasChanges = changes.changedFileCount > 0;
 
-  const structuredOutcome = buildOutcome({
-    packet,
-    testCommand: packet.targetTestCommand,
-    agentExitCode: agentResult.exitCode,
-    testExitCode: testResult.exitCode,
-    changedFileCount: changes.changedFileCount,
-    changedFileSummary: changes.changedFileSummary,
-    durationMs,
-    failureReason,
-  });
-
-  if (failureReason.length > 0) {
-    return {
-      ok: false,
-      errorCode: agentResult.timedOut
-        ? "CURSOR_CLI_TIMEOUT"
-        : agentResult.exitCode !== 0
-          ? "CURSOR_CLI_FAILED"
-          : "REPOSITORY_TESTS_FAILED",
-      summary: failureReason,
-      structuredOutcome,
-    };
-  }
-
-  if (changes.changedFileCount > 0) {
+  // Capture a test-passing candidate before interpreting the agent's own exit
+  // status. The deterministic test + independent verifier are authoritative; a
+  // timeout/non-zero Codex exit must not discard already-valid work.
+  if (testsPassed && hasChanges) {
     const gitCapture = input.gitCapture;
     if (gitCapture === undefined) {
       throw new ActuatorError("invalid_config", "Git capture reader is required when checkout has changes");
@@ -216,9 +348,54 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
     });
   }
 
+  let failureReason = "";
+  let errorCode: string | undefined;
+  if (!testsPassed) {
+    failureReason = "Trusted repository tests failed";
+    errorCode = "REPOSITORY_TESTS_FAILED";
+  } else if (!hasChanges) {
+    failureReason = "Coding task produced no code changes to verify";
+    errorCode = agentResult.timedOut
+      ? "CODEX_CLI_TIMEOUT"
+      : agentResult.exitCode !== 0
+        ? "CODEX_CLI_FAILED"
+        : "NO_CODE_CHANGES";
+  } else if (agentResult.timedOut) {
+    // Passing changed work is preserved and sent to the independent verifier.
+    failureReason = "Codex timed out after producing a passing candidate; candidate preserved";
+  } else if (agentResult.exitCode !== 0) {
+    failureReason = "Codex exited non-zero after producing a passing candidate; candidate preserved";
+  } else if (usageAccountingEstimated) {
+    failureReason = "Codex usage event missing; reservation charged conservatively";
+  }
+
+  const structuredOutcome = buildOutcome({
+    model,
+    ...(usage !== undefined ? { usage } : {}),
+    estimatedCostUsd,
+    usageAccountingEstimated,
+    budgetReservationUsd: reservationUsd,
+    budgetRemainingUsdBefore: budget.remainingHardLimit,
+    agentExitCode: agentResult.exitCode,
+    testExitCode: testResult.exitCode,
+    changedFileCount: changes.changedFileCount,
+    durationMs,
+    failureReason,
+  });
+
+  if (errorCode !== undefined) {
+    return {
+      ok: false,
+      errorCode,
+      summary: failureReason,
+      structuredOutcome,
+    };
+  }
+
+  const warning = failureReason.length > 0 ? ` (${failureReason})` : "";
   return {
     ok: true,
-    summary: "Coding-task completed with passing trusted repository tests",
+    summary: `Codex ${model} produced a passing candidate for independent verification${warning}`,
     structuredOutcome,
   };
 }

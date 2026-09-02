@@ -11,7 +11,7 @@ function bulletLines(items: readonly { readonly id: string; readonly text: strin
 }
 
 /**
- * Bounded, non-interactive prompt for Cursor CLI headless execution.
+ * Bounded, non-interactive prompt for Codex CLI headless execution.
  * Must not include secrets or environment values.
  */
 export function buildCodingTaskPrompt(packet: WorkerTaskPacket): string {
@@ -53,6 +53,11 @@ export function buildCodingTaskPrompt(packet: WorkerTaskPacket): string {
     "- Edit files only inside the provided workspace checkout.",
     "- Do not push, merge, deploy, or run production actions.",
     "- Do not modify assayer-autodev or any secrets.",
+    "- Do not push, fetch remote resources, install packages, start servers, or run long-lived commands.",
+    "- Do not run the repository test/build command yourself; the trusted host runs setup/tests after you exit.",
+    "- Use only short local inspection/edit commands needed to make the code change.",
+    "- Prefer the smallest patch that satisfies the task; do not perform optional refactors or cleanup.",
+    "- Once the bounded implementation is complete, stop instead of continuing exploratory work.",
     "- Do not decide final task acceptance; tests and Master verification happen later.",
     "",
     `Task ID: ${packet.taskId}`,
@@ -62,6 +67,9 @@ export function buildCodingTaskPrompt(packet: WorkerTaskPacket): string {
     "",
     ...repairSection,
     ...(repairSection.length > 0 ? [""] : []),
+    "Do-not-modify constraints (authoritative):",
+    constraints,
+    "",
     "Approved requirements:",
     requirements,
     "",
@@ -70,9 +78,6 @@ export function buildCodingTaskPrompt(packet: WorkerTaskPacket): string {
     "",
     "Open relevant blockers:",
     blockers,
-    "",
-    "Do-not-modify constraints:",
-    constraints,
     "",
     "Complete only the bounded implementation work needed for this task inside the checkout.",
   ].join("\n");

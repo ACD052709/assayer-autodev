@@ -15,3 +15,4 @@ export * from "./budget.js";
 export * from "./audit-finding.js";
 export * from "./code-candidate.js";
 export * from "./promotion-target.js";
+export * from "./coding-model.js";

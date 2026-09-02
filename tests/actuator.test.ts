@@ -199,13 +199,14 @@ describe("parseActuatorCli", () => {
     ).toThrow(/Unsupported --execution-mode/);
   });
 
-  it("accepts coding-task executionMode", () => {
+  it("accepts coding-task executionMode and captures the OpenAI worker key", () => {
     const config = parseActuatorCli(
       ["--worker-run-id", WORKER_RUN_ID, "--execution-mode", "coding-task"],
-      env,
+      { ...env, OPENAI_API_KEY: "openai-worker-placeholder" },
     );
     expect(config.executionMode).toBe("coding-task");
     expect(config.workspaceRoot).toBe("/tmp/autodev-workspaces");
+    expect(config.openaiApiKey).toBe("openai-worker-placeholder");
   });
 
   it("rejects arbitrary command input", () => {

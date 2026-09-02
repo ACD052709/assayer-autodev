@@ -5,8 +5,9 @@
 # candidate; this workflow does not directly promote verified code. Promotion
 # is handled by the separate AutoDev promotion workflow.
 #
-# This workflow communicates with the assayer-autodev control plane and uses
-# only the credentials required for its implementation role.
+# The worker passes OPENAI_API_KEY only to the actuator step. The actuator then
+# injects it only into the Codex process as CODEX_API_KEY; repository-controlled
+# tests receive a sanitized environment with API keys/tokens removed.
 
 name: AutoDev worker
 
@@ -55,13 +56,15 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Install Cursor CLI
-        run: |
-          curl https://cursor.com/install -fsS | bash
-          echo "$HOME/.cursor/bin" >> "$GITHUB_PATH"
+      - name: Install pinned Codex CLI
+        run: npm install --global @openai/codex@0.148.0
+
+      - name: Verify Codex CLI
+        run: codex --version
 
       - name: Run worker actuator
         env:
           AUTODEV_SERVICE_TOKEN: ${{ secrets.AUTODEV_SERVICE_TOKEN }}
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AUTODEV_TARGET_REPO_READ_TOKEN: ${{ secrets.AUTODEV_TARGET_REPO_READ_TOKEN }}
         run: npm run actuator -- --worker-run-id "${{ github.event.inputs.workerRunId }}" --execution-mode "${{ github.event.inputs.executionMode }}"

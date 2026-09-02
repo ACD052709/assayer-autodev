@@ -338,3 +338,94 @@ describe("WorkerDispatcher persistWorkerReport", () => {
     expect(run.status).toBe("queued");
   });
 });
+
+describe("WorkerDispatcher coding budget gate", () => {
+  function setup() {
+    const syncStore = createInMemoryStateStore();
+    syncStore.createProject({ id: "proj-budget-gate", name: "Budget gate", description: "Budgeted coding" });
+    const dispatcher = createWorkerDispatcher({
+      store: asAsyncStore(syncStore),
+      idFactory: createSequentialIdFactory(),
+      codingBudgetGate: true,
+    });
+    return { syncStore, dispatcher };
+  }
+
+  it("keeps work pending when no dollar budget exists", async () => {
+    const { syncStore, dispatcher } = setup();
+    syncStore.createTask({
+      id: "task-budget-pending",
+      projectId: "proj-budget-gate",
+      title: "Implement",
+      description: "Do work",
+      kind: "implementation",
+    });
+    const result = await dispatcher.dispatch("proj-budget-gate", { maxAssignments: 1 });
+    expect(result.assignments).toHaveLength(0);
+    expect(result.budgetBlocked).toMatchObject({
+      resourceType: "llm_cost_usd",
+      reason: "budget_unavailable",
+      requiredAmount: 0.25,
+    });
+    expect(syncStore.getTask("task-budget-pending")?.status).toBe("pending");
+  });
+
+  it("resumes dispatch after the budget is increased while preserving consumed spend", async () => {
+    const { syncStore, dispatcher } = setup();
+    syncStore.createTask({
+      id: "task-budget-resume",
+      projectId: "proj-budget-gate",
+      title: "Implement",
+      description: "Do work",
+      kind: "implementation",
+    });
+    syncStore.addBudgetResource({
+      projectId: "proj-budget-gate",
+      resourceType: "llm_cost_usd",
+      hardLimit: 0.2,
+      unit: "usd",
+    });
+    syncStore.recordBudgetEntry({
+      id: "spent-before-pause",
+      projectId: "proj-budget-gate",
+      category: "llm_cost_usd",
+      amount: 0.1,
+      unit: "usd",
+    });
+
+    const blocked = await dispatcher.dispatch("proj-budget-gate", { maxAssignments: 1 });
+    expect(blocked.assignments).toHaveLength(0);
+    expect(blocked.budgetBlocked?.reason).toBe("insufficient_remaining_budget");
+
+    syncStore.increaseBudgetResource({
+      projectId: "proj-budget-gate",
+      resourceType: "llm_cost_usd",
+      additionalAmount: 1,
+    });
+    const resumed = await dispatcher.dispatch("proj-budget-gate", { maxAssignments: 1 });
+    expect(resumed.assignments).toHaveLength(1);
+    expect(syncStore.getBudgetLedger("proj-budget-gate")?.entries[0]?.amount).toBe(0.1);
+  });
+
+  it("reserves active parallel worker headroom so the same dollars cannot be assigned twice", async () => {
+    const { syncStore, dispatcher } = setup();
+    for (const id of ["task-budget-a", "task-budget-b"]) {
+      syncStore.createTask({
+        id,
+        projectId: "proj-budget-gate",
+        title: id,
+        description: "Do work",
+        kind: "implementation",
+      });
+    }
+    syncStore.addBudgetResource({
+      projectId: "proj-budget-gate",
+      resourceType: "llm_cost_usd",
+      hardLimit: 0.25,
+      unit: "usd",
+    });
+    const result = await dispatcher.dispatch("proj-budget-gate", { maxAssignments: 2 });
+    expect(result.assignments).toHaveLength(1);
+    expect(result.budgetBlocked?.reason).toBe("insufficient_remaining_budget");
+  });
+});

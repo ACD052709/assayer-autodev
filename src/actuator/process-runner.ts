@@ -20,9 +20,25 @@ export interface ProcessRunner {
   run(input: ProcessRunInput): Promise<ProcessRunResult>;
 }
 
+const TERMINATION_GRACE_MS = 5_000;
+
+/**
+ * Bounded subprocess runner. Timeout/abort first requests graceful termination,
+ * then escalates to SIGKILL so an uncooperative coding agent cannot keep a paid
+ * request alive until the outer GitHub Actions job timeout.
+ */
 export function createSubprocessRunner(): ProcessRunner {
   return {
     async run(input: ProcessRunInput): Promise<ProcessRunResult> {
+      if (input.signal?.aborted) {
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: "Process launch skipped because execution was already aborted",
+          timedOut: false,
+        };
+      }
+
       return new Promise<ProcessRunResult>((resolve, reject) => {
         const child = spawn(input.command, [...input.args], {
           cwd: input.cwd,
@@ -32,13 +48,23 @@ export function createSubprocessRunner(): ProcessRunner {
         let stdout = "";
         let stderr = "";
         let timedOut = false;
-        const timer = setTimeout(() => {
-          timedOut = true;
+        let hardKillTimer: ReturnType<typeof setTimeout> | undefined;
+
+        const terminate = (markTimedOut: boolean): void => {
+          if (markTimedOut) timedOut = true;
+          if (child.exitCode !== null || child.signalCode !== null) return;
           child.kill("SIGTERM");
-        }, input.timeoutMs);
-        const onAbort = (): void => {
-          child.kill("SIGTERM");
+          if (hardKillTimer === undefined) {
+            hardKillTimer = setTimeout(() => {
+              if (child.exitCode === null && child.signalCode === null) {
+                child.kill("SIGKILL");
+              }
+            }, TERMINATION_GRACE_MS);
+          }
         };
+
+        const timer = setTimeout(() => terminate(true), input.timeoutMs);
+        const onAbort = (): void => terminate(false);
         input.signal?.addEventListener("abort", onAbort, { once: true });
         child.stdout?.on("data", (chunk: Buffer | string) => {
           stdout += String(chunk);
@@ -48,11 +74,13 @@ export function createSubprocessRunner(): ProcessRunner {
         });
         child.on("error", (error) => {
           clearTimeout(timer);
+          if (hardKillTimer !== undefined) clearTimeout(hardKillTimer);
           input.signal?.removeEventListener("abort", onAbort);
           reject(error);
         });
         child.on("close", (code) => {
           clearTimeout(timer);
+          if (hardKillTimer !== undefined) clearTimeout(hardKillTimer);
           input.signal?.removeEventListener("abort", onAbort);
           resolve({
             exitCode: code ?? 1,

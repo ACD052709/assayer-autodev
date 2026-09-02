@@ -24,8 +24,9 @@ flowchart TB
     R2[(R2 AUTODEV_EVIDENCE)]
   end
 
-  subgraph models [Model]
-    OAI[OpenAI Responses API / GPT-5.6 Sol]
+  subgraph models [Models / agent]
+    OAI[OpenAI Responses API / GPT-5.6 Sol Master]
+    CODEX[Codex CLI / Luna -> Terra -> Sol coding]
   end
 
   subgraph local [Local / tests]
@@ -40,6 +41,8 @@ flowchart TB
   API --> ORCH
   ORCH --> D1
   ORCH --> OAI
+  WK --> CODEX
+  CODEX --> API
   API --> D1
   API --> R2
   MEM -.->|same StateStore contract| D1
@@ -60,7 +63,9 @@ D1 state is authoritative. Prior chat text and worker narrative are not.
 
 Master calls require a stored `llm_tokens` **hard** limit on the same project. Authorization uses that durable ledger (not request-body pricing). If the ledger is missing, has no `llm_tokens` hard limit, is exhausted, or remaining capacity is below the estimated call size, the orchestrator returns `BLOCKED` and **does not call the model**.
 
-Actual token usage is recorded as budget entries when the model reports usage. This schema does not store a separate reservation row; `reservedAmount` is `0` and remaining capacity is `hardLimit - consumed`.
+Implementation coding uses a separate durable `llm_cost_usd` project budget. Before dispatch, AutoDev reserves conservative headroom for the selected Codex model and subtracts active worker reservations so parallel workers do not all consume the same apparent remaining budget. When insufficient headroom remains, orchestration reports `waiting_for_budget` without discarding tasks, candidates, verification state, or prior spend. The hard limit can be increased in place through the budget-increase API.
+
+Codex usage is recorded as dollar-denominated budget entries, including cached reads, billed prompt-cache writes, and GPT-5.6 long-context multipliers. If a Codex process ends before emitting its terminal usage event, AutoDev conservatively records the model's reservation amount rather than silently undercounting. A timeout/non-zero Codex exit that nevertheless leaves changed code passing the trusted deterministic test still preserves that candidate for independent verification.
 
 ### Operational initialization sequence
 
@@ -130,7 +135,7 @@ Deployment state is environment-specific. Before a hardened deployment, run `npm
 
 Protected routes fail closed (`503 auth_misconfigured`) if `AUTODEV_SERVICE_TOKEN` is missing at runtime. Live Master runs fail closed if `OPENAI_API_KEY` is missing (`503 master_misconfigured` / real client constructor error).
 
-`AUTODEV_SERVICE_TOKEN` is required for the final secured deployment. `OPENAI_API_KEY` is required for the first live Master model call.
+`AUTODEV_SERVICE_TOKEN` is required for the secured deployment. The Cloudflare Worker `OPENAI_API_KEY` is used by the Master. The GitHub Actions repository secret with the same name is independently configured for the Codex implementation worker. Private target repositories may additionally use the least-privilege `AUTODEV_TARGET_REPO_READ_TOKEN`, which is exposed only to trusted git clone/fetch subprocesses.
 
 ### D1 vs R2 roles
 
@@ -167,7 +172,9 @@ Domain types are shared; only the persistence adapter changes.
 | GET | `/api/projects/:projectId/release-contract` | Get latest release contract |
 | POST | `/api/projects/:projectId/budgets` | Create a resource budget (`resourceType`, `hardLimit`, optional `softLimit`, `unit`) |
 | GET | `/api/projects/:projectId/budgets` | List resource budgets for the project |
-| GET | `/api/projects/:projectId/budgets/:budgetId` | Get one resource budget (`budgetId` = `resourceType`, e.g. `llm_tokens`) |
+| GET | `/api/projects/:projectId/budgets/:budgetId` | Get one resource budget (`budgetId` = `resourceType`, e.g. `llm_tokens` or `llm_cost_usd`) |
+| POST | `/api/projects/:projectId/budgets/:budgetId/increase` | Add budget headroom without resetting consumed spend or project state |
+| POST | `/api/projects/:projectId/budget-entries` | Record idempotent resource usage (used by coding workers for actual/estimated Codex spend) |
 | POST | `/api/projects` | Create project |
 | POST | `/api/requirements` | Create requirement |
 | POST | `/api/tasks` | Create task |
@@ -190,7 +197,9 @@ This API is **private machine-to-machine infrastructure**. It is not a browser-f
 | Authentication | Protected routes require `Authorization: Bearer <token>` |
 | Secret binding | `AUTODEV_SERVICE_TOKEN` and `OPENAI_API_KEY` via `wrangler secret put` — **never** in source, tests, README examples, or `.env.example` |
 | Fail closed | Protected routes return `503 auth_misconfigured` if the service token is missing at runtime |
-| Master fail closed | Live OpenAI client refuses to construct without `OPENAI_API_KEY`; POST `/api/master/run` returns `503` if the orchestrator is not configured |
+| Master fail closed | Live OpenAI client refuses to construct without the Worker `OPENAI_API_KEY`; POST `/api/master/run` returns `503` if the orchestrator is not configured |
+| Coding secret isolation | GitHub Actions passes its `OPENAI_API_KEY` only to the trusted actuator; Codex receives it as `CODEX_API_KEY`, while repository-controlled setup/tests receive a sanitized environment |
+| Private target clone | Optional `AUTODEV_TARGET_REPO_READ_TOKEN` is used only as ephemeral Git HTTP auth and is not written into the clone URL or repository config |
 | Roles (V1) | Route policies declare `master`, `worker`, `verifier`, `admin`; the service token maps temporarily to `admin` |
 | Request limits | JSON metadata max **256 KiB**; invalid `Content-Length` rejected |
 | Evidence bootstrap | `blobBase64` is **temporary** — max decoded **64 KiB** for small test blobs only |
@@ -269,18 +278,16 @@ npx wrangler d1 migrations apply assayer-autodev --remote
 
 Worker deployment is a separate step after remote migration and secret configuration.
 
-## What remains intentionally unimplemented
+## Current controlled limitations
 
-- Cursor ACP actuator / workers that edit code
-- Playwright browser execution
-- Independent verifier execution (records can be stored; no executor yet)
-- GitHub Actions executor
-- Anthropic model client
-- Assayer product integration
-- Per-role token issuance (V1 uses one service token mapped to admin)
-- Direct-to-R2 presigned/large evidence uploads
-- Remote application of migration `0002_master_ai.sql` and Worker deployment
-- Live OpenAI secret installation
+- The implementation actuator is **Codex CLI**, using GPT-5.6 Luna for original work and repair 1, Terra on repair 2, and Sol on repair 3; the default three-repair limit then stops the chain. Cursor is no longer required by the implementation workflow.
+- Coding spend is fail-closed before dispatch when `llm_cost_usd` headroom is insufficient. The reservation is conservative admission control, not a provider-side per-request dollar ceiling; actual usage is reconciled after each Codex run. Active-run subtraction protects the normal single orchestration cycle, but truly concurrent dispatcher invocations are not yet one atomic D1 reservation transaction.
+- Codex is pinned to 0.148.0 for the initial proof and bounded to workspace-write/no-network execution, approval mode `never`, standard service tier, disabled fast/multi-agent/code-mode-host features, and a five-minute coding timeout.
+- Passing changed code is persisted as a candidate even after an abnormal Codex exit. A provider interruption before trusted tests pass may still discard that failing partial workspace; no unverified partial patch is promoted merely to preserve progress.
+- Exact-candidate browser verification and controlled promotion remain separate from the coding worker. The builder cannot approve or promote its own work.
+- Candidate patch bootstrap through JSON/base64 remains intentionally limited to small artifacts; large real changes will eventually need direct/chunked R2 transfer.
+- V1 still maps the single service token to the administrative machine role rather than issuing separate per-role tokens.
+- Real Assayer targets remain disabled until disposable PASS and REPAIR end-to-end proofs pass on the exact deployed commit.
 
 ## License
 

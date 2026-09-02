@@ -2,6 +2,7 @@ import type { EntityId, ISOTimestamp, Timestamps } from "./common.js";
 
 export type BudgetCategory =
   | "llm_tokens"
+  | "llm_cost_usd"
   | "compute"
   | "browser_minutes"
   | "storage"
@@ -61,6 +62,7 @@ export interface InitializeBudgetLedgerInput {
 
 export const BUDGET_RESOURCE_UNITS: Record<BudgetCategory, string> = {
   llm_tokens: "tokens",
+  llm_cost_usd: "usd",
   compute: "minutes",
   browser_minutes: "minutes",
   storage: "bytes",
@@ -82,6 +84,13 @@ export interface AddBudgetResourceInput {
   readonly hardLimit: number;
   readonly unit: string;
   readonly softLimit?: number;
+}
+
+
+export interface IncreaseBudgetResourceInput {
+  readonly projectId: EntityId;
+  readonly resourceType: BudgetCategory;
+  readonly additionalAmount: number;
 }
 
 export interface BudgetResourceView {

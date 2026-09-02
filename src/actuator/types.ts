@@ -19,8 +19,8 @@ export const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 /** Consecutive non-ownership heartbeat failures before fail-closed. */
 export const DEFAULT_HEARTBEAT_FAILURE_LIMIT = 2;
 
-/** Default bounded Cursor CLI runtime for coding-task (below typical GHA job timeout). */
-export const DEFAULT_CODING_TASK_TIMEOUT_MS = 600_000;
+/** Default bounded Codex CLI runtime for coding-task (below typical GHA job timeout). */
+export const DEFAULT_CODING_TASK_TIMEOUT_MS = 300_000;
 
 export const DEFAULT_WORKSPACE_ROOT = "/tmp/autodev-workspaces";
 
@@ -49,7 +49,9 @@ export interface ActuatorConfig {
   readonly syntheticNoopDurationMs: number;
   readonly workspaceRoot: string;
   readonly codingTaskTimeoutMs: number;
-  readonly cursorApiKey?: string;
+  readonly openaiApiKey?: string;
+  /** Optional least-privilege token used only by trusted git clone/fetch for private target repos. */
+  readonly targetRepoReadToken?: string;
 }
 
 export interface ClaimResult {
@@ -79,12 +81,31 @@ export interface TerminalResult {
   readonly applied: boolean;
 }
 
+export interface BudgetResourceSnapshot {
+  readonly resourceType: string;
+  readonly unit: string;
+  readonly hardLimit: number;
+  readonly consumedAmount: number;
+  readonly remainingHardLimit: number;
+}
+
 export interface ControlPlaneClient {
   claim(workerRunId: string, ownerId: string): Promise<ClaimResult>;
   heartbeat(workerRunId: string, leaseToken: string): Promise<HeartbeatResult>;
   succeed(workerRunId: string, leaseToken: string, input: SucceedInput): Promise<TerminalResult>;
   fail(workerRunId: string, leaseToken: string, input: FailInput): Promise<TerminalResult>;
   getTaskPacket(workerRunId: string, leaseToken: string): Promise<import("../domain/worker-task-packet.js").WorkerTaskPacket>;
+  getBudget?(projectId: string, budgetId: string): Promise<BudgetResourceSnapshot | undefined>;
+  recordBudgetEntry?(input: {
+    readonly id: string;
+    readonly projectId: string;
+    readonly resourceType: string;
+    readonly amount: number;
+    readonly unit: string;
+    readonly taskId?: string;
+    readonly workerRunId?: string;
+    readonly description?: string;
+  }): Promise<void>;
   getCodeCandidate?(candidateId: string): Promise<import("../domain/code-candidate.js").CodeCandidate>;
   fetchCodeCandidatePatch?(candidateId: string): Promise<string>;
   createCodeCandidate(input: {

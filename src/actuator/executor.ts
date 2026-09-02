@@ -58,7 +58,11 @@ export async function defaultSleep(ms: number, signal?: AbortSignal): Promise<vo
 }
 
 export async function runActuator(options: RunActuatorOptions): Promise<ActuatorRunResult> {
-  const secrets = [options.config.serviceToken];
+  const secrets = [
+    options.config.serviceToken,
+    options.config.openaiApiKey,
+    options.config.targetRepoReadToken,
+  ];
   const logger = createSanitizingLogger(secrets, options.logger);
   const timers = options.timers ?? DEFAULT_TIMERS;
   const sleep = options.sleep ?? defaultSleep;
@@ -118,7 +122,10 @@ export async function runActuator(options: RunActuatorOptions): Promise<Actuator
           leaseToken: token,
           workspaceRoot: config.workspaceRoot,
           codingTaskTimeoutMs: config.codingTaskTimeoutMs,
-          ...(config.cursorApiKey !== undefined ? { cursorApiKey: config.cursorApiKey } : {}),
+          ...(config.openaiApiKey !== undefined ? { openaiApiKey: config.openaiApiKey } : {}),
+          ...(config.targetRepoReadToken !== undefined
+            ? { targetRepoReadToken: config.targetRepoReadToken }
+            : {}),
           client,
           process: options.processRunner ?? createSubprocessRunner(),
           git: options.gitRunner ?? createGitRunner(),

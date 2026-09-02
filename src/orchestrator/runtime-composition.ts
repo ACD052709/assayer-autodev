@@ -78,6 +78,7 @@ export function createControlPlaneComposition(
     store: options.store,
     idFactory: ids,
     launchBridge: implementationLaunchBridge,
+    codingBudgetGate: options.env.GITHUB_EXECUTION_MODE?.trim() === "coding-task",
   });
   const workerRunLifecycle = createWorkerRunLifecycle({ store: options.store, dispatcher: taskDispatcher });
 

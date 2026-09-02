@@ -30,19 +30,26 @@ describe("GitHub Actions worker workflow", () => {
     expect(workflow).not.toContain("actions: write");
   });
 
-  it("does not clone Assayer or use Cloudflare/OpenAI secrets", () => {
+  it("does not clone Assayer or use Cloudflare deployment credentials", () => {
     expect(workflow.toLowerCase()).not.toContain("assayer-production");
     expect(workflow).not.toMatch(/assayer\/assayer/i);
     expect(workflow).not.toContain("CLOUDFLARE");
-    expect(workflow).not.toContain("OPENAI_API_KEY");
     expect(workflow).not.toContain("wrangler deploy");
     expect(workflow).not.toContain("d1 execute");
   });
 
-  it("references the service token only from GitHub Secrets", () => {
+  it("references worker credentials only from GitHub Secrets and installs pinned Codex", () => {
     expect(workflow).toContain("secrets.AUTODEV_SERVICE_TOKEN");
+    expect(workflow).toContain("secrets.OPENAI_API_KEY");
+    expect(workflow).toContain("secrets.AUTODEV_TARGET_REPO_READ_TOKEN");
+    expect(workflow).toContain("@openai/codex@0.148.0");
+    expect(workflow).toContain("codex --version");
+    expect(workflow).not.toContain("CURSOR_API_KEY");
+    expect(workflow).not.toContain("cursor.com");
     expect(workflow).not.toMatch(/AUTODEV_SERVICE_TOKEN:\s*[A-Za-z0-9_-]{8,}/);
+    expect(workflow).not.toMatch(/OPENAI_API_KEY:\s*sk-/);
     expect(workflow).not.toContain("echo $AUTODEV_SERVICE_TOKEN");
+    expect(workflow).not.toContain("echo $OPENAI_API_KEY");
     expect(workflow).not.toContain("leaseToken");
   });
 
@@ -61,6 +68,7 @@ describe("GitHub Actions browser verifier workflow", () => {
     expect(verifierWorkflow).toContain("orchestrated-verifier");
     expect(verifierWorkflow).toContain("secrets.AUTODEV_SERVICE_TOKEN");
     expect(verifierWorkflow).not.toContain("CURSOR_API_KEY");
+    expect(verifierWorkflow).not.toContain("OPENAI_API_KEY");
     expect(verifierWorkflow).not.toContain("executionMode");
     expect(verifierWorkflow).toContain("playwright install");
   });
@@ -75,6 +83,7 @@ describe("GitHub Actions verified promotion workflow", () => {
     expect(promotionWorkflow).toContain("secrets.AUTODEV_PROMOTION_GITHUB_TOKEN");
     expect(promotionWorkflow).toContain("secrets.AUTODEV_SERVICE_TOKEN");
     expect(promotionWorkflow).not.toContain("CURSOR_API_KEY");
+    expect(promotionWorkflow).not.toContain("OPENAI_API_KEY");
     expect(promotionWorkflow).not.toContain("playwright");
     expect(promotionWorkflow).not.toContain("push --force");
     expect(promotionWorkflow).not.toContain("--force-with-lease");

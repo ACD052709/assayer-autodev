@@ -47,7 +47,7 @@ const MASTER_PHASES = new Set<MasterPhase>([
 const MASTER_INBOX_KINDS = new Set<MasterInboxItemKind>([
   "worker_report", "verification_result", "permission_request", "budget_alert", "task_update", "human_message", "master_decision",
 ]);
-const BUDGET_CATEGORIES = new Set<BudgetCategory>(["llm_tokens", "compute", "browser_minutes", "storage", "other"]);
+const BUDGET_CATEGORIES = new Set<BudgetCategory>(["llm_tokens", "llm_cost_usd", "compute", "browser_minutes", "storage", "other"]);
 const BUDGET_LIMIT_KINDS = new Set<BudgetLimitKind>(["soft", "hard"]);
 const MASTER_ACTIONS = new Set<MasterAction>([
   "CREATE_TASKS",

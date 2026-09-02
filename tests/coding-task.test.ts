@@ -8,19 +8,30 @@ import {
   summarizeCheckoutChangesFromStatus,
 } from "../src/actuator/coding-task-checkout.js";
 import {
-  buildCursorCliInvocation,
-  CURSOR_CLI_COMMAND,
+  buildCodexCliInvocation,
+  CODEX_CLI_COMMAND,
   isolatedCheckoutDirectory,
+  parseCodexUsage,
   parseTrustedTestCommand,
-} from "../src/actuator/cursor-cli.js";
+} from "../src/actuator/codex-cli.js";
 import { runActuator } from "../src/actuator/executor.js";
-import type { ControlPlaneClient } from "../src/actuator/types.js";
+import type { BudgetResourceSnapshot, ControlPlaneClient } from "../src/actuator/types.js";
 import { CODING_TASK_KIND } from "../src/actuator/types.js";
 import type { WorkerTaskPacket } from "../src/domain/worker-task-packet.js";
 
 const LEASE_TOKEN = "b".repeat(64);
-const API_KEY = "cursor-api-key-placeholder-not-a-real-secret";
+const API_KEY = "openai-api-key-placeholder-not-a-real-secret";
 const WORKER_RUN_ID = "wrun-coding-task-test";
+const CODEX_USAGE_JSONL = `${JSON.stringify({
+  type: "turn.completed",
+  usage: {
+    input_tokens: 1000,
+    cached_input_tokens: 500,
+    cache_write_input_tokens: 100,
+    output_tokens: 100,
+    reasoning_output_tokens: 20,
+  },
+})}\n`;
 
 function samplePacket(overrides?: Partial<WorkerTaskPacket>): WorkerTaskPacket {
   return {
@@ -72,39 +83,101 @@ function samplePacket(overrides?: Partial<WorkerTaskPacket>): WorkerTaskPacket {
   };
 }
 
-describe("coding-task prompt and cursor cli", () => {
+function codingBudget(remaining = 10): BudgetResourceSnapshot {
+  return {
+    resourceType: "llm_cost_usd",
+    unit: "usd",
+    hardLimit: 10,
+    consumedAmount: 10 - remaining,
+    remainingHardLimit: remaining,
+  };
+}
+
+function baseClient(overrides: Partial<ControlPlaneClient> = {}): ControlPlaneClient {
+  return {
+    claim: vi.fn(),
+    heartbeat: vi.fn(),
+    succeed: vi.fn(),
+    fail: vi.fn(),
+    getTaskPacket: async () => samplePacket(),
+    getBudget: async () => codingBudget(),
+    recordBudgetEntry: vi.fn(async () => undefined),
+    createCodeCandidate: async (input) => ({ id: input.id }),
+    ...overrides,
+  };
+}
+
+describe("coding-task prompt and Codex CLI", () => {
   it("builds a bounded prompt without secrets", () => {
     const prompt = buildCodingTaskPrompt(samplePacket());
     expect(prompt).toContain("Add feature");
     expect(prompt).toContain("Must work");
     expect(prompt).toContain("Tests pass");
     expect(prompt).toContain("production/**");
+    expect(prompt).toContain("Do not run the repository test/build command yourself");
+    expect(prompt).toContain("Prefer the smallest patch");
+    expect(prompt).toContain("Once the bounded implementation is complete, stop");
+    expect(prompt.indexOf("Do-not-modify constraints (authoritative):")).toBeLessThan(prompt.indexOf("Approved requirements:"));
     expect(prompt).not.toContain(API_KEY);
     expect(prompt).not.toContain(LEASE_TOKEN);
   });
 
-  it("constructs non-interactive Cursor CLI invocation", () => {
+  it("constructs a deterministic non-interactive Codex invocation", () => {
     const checkoutDir = isolatedCheckoutDirectory("/tmp/work", WORKER_RUN_ID);
-    const invocation = buildCursorCliInvocation({
+    const invocation = buildCodexCliInvocation({
       workspaceDir: checkoutDir,
       prompt: "do work",
       timeoutMs: 120_000,
     });
-    expect(invocation.command).toBe(CURSOR_CLI_COMMAND);
+    expect(invocation.command).toBe(CODEX_CLI_COMMAND);
     expect(invocation.args).toEqual([
-      "--print",
-      "--output-format",
-      "text",
-      "--force",
+      "--ask-for-approval",
+      "never",
+      "exec",
+      "--ephemeral",
+      "--json",
+      "--sandbox",
+      "workspace-write",
+      "--ignore-user-config",
+      "--ignore-rules",
+      "--disable",
+      "code_mode",
+      "--disable",
+      "code_mode_host",
+      "--disable",
+      "multi_agent",
+      "--disable",
+      "multi_agent_v2",
+      "--disable",
+      "fast_mode",
       "--model",
-      "auto",
-      "--workspace",
-      checkoutDir,
+      "gpt-5.6-luna",
+      "-c",
+      'model_reasoning_effort="low"',
+      "-c",
+      'service_tier="default"',
+      "-c",
+      "sandbox_workspace_write.network_access=false",
+      "-c",
+      "shell_environment_policy.ignore_default_excludes=false",
+      "-c",
+      'shell_environment_policy.inherit="core"',
       "do work",
     ]);
-    expect(invocation.requiredEnvKeys).toEqual(["CURSOR_API_KEY"]);
+    expect(invocation.requiredEnvKeys).toEqual(["CODEX_API_KEY"]);
     expect(invocation.cwd).toBe(checkoutDir);
     expect(invocation.timeoutMs).toBe(120_000);
+  });
+
+  it("parses machine-readable Codex usage", () => {
+    expect(parseCodexUsage(CODEX_USAGE_JSONL)).toEqual({
+      inputTokens: 1000,
+      cachedInputTokens: 500,
+      cacheWriteInputTokens: 100,
+      outputTokens: 100,
+      reasoningOutputTokens: 20,
+    });
+    expect(parseCodexUsage("not-json\n")).toBeUndefined();
   });
 });
 
@@ -141,61 +214,85 @@ describe("coding-task checkout and tests", () => {
     ]);
   });
 
+  it("uses a private-repo read token only in ephemeral git auth configuration", async () => {
+    const calls: Array<{ args: string[]; env?: NodeJS.ProcessEnv }> = [];
+    const token = "private-repo-token-placeholder";
+    await prepareIsolatedCheckout({
+      packet: samplePacket(),
+      workspaceRoot: "/tmp/work",
+      targetRepoReadToken: token,
+      git: {
+        async run(args, _cwd, env) {
+          calls.push({ args: [...args], ...(env !== undefined ? { env } : {}) });
+          return 0;
+        },
+      },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.args.join(" ")).not.toContain(token);
+    expect(calls[0]!.args.join(" ")).toContain("https://github.com/ACD052709/example-target.git");
+    expect(calls[0]!.env?.GIT_CONFIG_KEY_0).toContain("extraheader");
+    expect(calls[0]!.env?.GIT_CONFIG_VALUE_0).not.toContain(token);
+    expect(calls[0]!.env?.GIT_TERMINAL_PROMPT).toBe("0");
+  });
+
   it("parses trusted test commands without shell interpolation", () => {
     expect(parseTrustedTestCommand("npm test")).toEqual({ command: "npm", args: ["test"] });
   });
 
   it("summarizes changed files from git status output", async () => {
-    const statusOutput = [" M src/a.ts", "?? src/b.ts"].join("\n") + "\n";
-    const summary = await summarizeCheckoutChangesFromStatus(statusOutput);
+    const summary = await summarizeCheckoutChangesFromStatus(" M src/a.ts\n?? src/b.ts\n");
     expect(summary.changedFileCount).toBe(2);
     expect(summary.changedFileSummary).toContain("src/a.ts");
   });
 });
 
 describe("runCodingTask", () => {
-  it("fails safely when CURSOR_API_KEY is missing", async () => {
-    const client: ControlPlaneClient = {
-      claim: vi.fn(),
-      heartbeat: vi.fn(),
-      succeed: vi.fn(),
-      fail: vi.fn(),
-      getTaskPacket: async () => samplePacket(),
-      createCodeCandidate: async (input) => ({ id: input.id }),
-    };
+  it("fails safely when OPENAI_API_KEY is missing", async () => {
     const result = await runCodingTask({
       workerRunId: WORKER_RUN_ID,
       leaseToken: LEASE_TOKEN,
       workspaceRoot: "/tmp/work",
       codingTaskTimeoutMs: 5_000,
-      client,
+      client: baseClient(),
       process: { run: vi.fn() },
       git: { run: vi.fn() },
       gitStatus: { readPorcelain: vi.fn() },
     });
     expect(result.ok).toBe(false);
-    expect(result.errorCode).toBe("CURSOR_API_KEY_MISSING");
-    expect(result.structuredOutcome.codingAgentUsed).toBe(true);
-    expect(result.structuredOutcome.agentExitCode).toBe(-1);
+    expect(result.errorCode).toBe("OPENAI_API_KEY_MISSING");
+        expect(result.structuredOutcome.agentExitCode).toBe(-1);
     expect(JSON.stringify(result)).not.toContain(API_KEY);
   });
 
-  it("runs agent then trusted tests without live Cursor dependency", async () => {
-    const processCalls: { command: string; args: string[]; cwd: string }[] = [];
-    const expectedCheckout = isolatedCheckoutDirectory("/tmp/work", WORKER_RUN_ID);
-    const client: ControlPlaneClient = {
-      claim: vi.fn(),
-      heartbeat: vi.fn(),
-      succeed: vi.fn(),
-      fail: vi.fn(),
-      getTaskPacket: async () => samplePacket(),
-      createCodeCandidate: async (input) => ({ id: input.id }),
-    };
+  it("pauses before paid work when coding budget is unavailable", async () => {
+    const processRun = vi.fn();
     const result = await runCodingTask({
       workerRunId: WORKER_RUN_ID,
       leaseToken: LEASE_TOKEN,
       workspaceRoot: "/tmp/work",
-      cursorApiKey: API_KEY,
+      openaiApiKey: API_KEY,
+      codingTaskTimeoutMs: 5_000,
+      client: baseClient({ getBudget: async () => undefined }),
+      process: { run: processRun },
+      git: { run: vi.fn() },
+      gitStatus: { readPorcelain: vi.fn() },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe("CODING_BUDGET_REQUIRED");
+    expect(processRun).not.toHaveBeenCalled();
+  });
+
+  it("runs Codex then trusted tests and records exact model usage cost", async () => {
+    const processCalls: { command: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }[] = [];
+    const expectedCheckout = isolatedCheckoutDirectory("/tmp/work", WORKER_RUN_ID);
+    const recordBudgetEntry = vi.fn(async () => undefined);
+    const client = baseClient({ recordBudgetEntry });
+    const result = await runCodingTask({
+      workerRunId: WORKER_RUN_ID,
+      leaseToken: LEASE_TOKEN,
+      workspaceRoot: "/tmp/work",
+      openaiApiKey: API_KEY,
       codingTaskTimeoutMs: 5_000,
       client,
       git: {
@@ -204,11 +301,7 @@ describe("runCodingTask", () => {
           return 0;
         },
       },
-      gitStatus: {
-        async readPorcelain() {
-          return " M README.md\n";
-        },
-      },
+      gitStatus: { readPorcelain: async () => " M README.md\n" },
       gitCapture: {
         async readRevParse() { return "a".repeat(40); },
         async stageAll() {},
@@ -217,36 +310,156 @@ describe("runCodingTask", () => {
       },
       process: {
         async run(input) {
-          processCalls.push({ command: input.command, args: [...input.args], cwd: input.cwd });
+          processCalls.push({ command: input.command, args: [...input.args], cwd: input.cwd, ...(input.env !== undefined ? { env: input.env } : {}) });
+          if (input.command === CODEX_CLI_COMMAND) {
+            expect(input.env?.CODEX_API_KEY).toBe(API_KEY);
+            expect(input.env?.OPENAI_API_KEY).toBeUndefined();
+            expect(input.env?.AUTODEV_SERVICE_TOKEN).toBeUndefined();
+            return { exitCode: 0, stdout: CODEX_USAGE_JSONL, stderr: "", timedOut: false };
+          }
+          expect(input.env?.CODEX_API_KEY).toBeUndefined();
           return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
         },
       },
       now: () => 0,
     });
-    expect(processCalls[0]!.command).toBe(CURSOR_CLI_COMMAND);
+    expect(processCalls[0]!.command).toBe(CODEX_CLI_COMMAND);
     expect(processCalls[0]!.cwd).toBe(expectedCheckout);
-    expect(processCalls[1]).toEqual({
-      command: "npm",
-      args: ["test"],
-      cwd: expectedCheckout,
-    });
+    expect(processCalls[1]!.command).toBe("npm");
+    expect(processCalls[1]!.args).toEqual(["test"]);
+    expect(processCalls[1]!.cwd).toBe(expectedCheckout);
     expect(result.ok).toBe(true);
     expect(result.structuredOutcome.kind).toBe(CODING_TASK_KIND);
-    expect(result.structuredOutcome.externalRepositoryModified).toBe(true);
+    expect(result.structuredOutcome.codingAgent).toBe("codex");
+    expect(result.structuredOutcome.codingModel).toBe("gpt-5.6-luna");
+    expect(result.structuredOutcome.changedFileCount).toBe(1);
     expect(result.structuredOutcome.testExitCode).toBe(0);
+    expect(result.structuredOutcome.estimatedCostUsd).toBeGreaterThan(0);
+    expect(recordBudgetEntry).toHaveBeenCalledTimes(1);
+    const recordedEntry = (recordBudgetEntry.mock.calls as unknown as readonly [readonly [Record<string, unknown>]])[0]![0];
+    expect(recordedEntry).toMatchObject({
+      projectId: "proj-coding",
+      resourceType: "llm_cost_usd",
+      unit: "usd",
+      workerRunId: WORKER_RUN_ID,
+      description: "codex:gpt-5.6-luna",
+    });
     expect(JSON.stringify(result)).not.toContain(API_KEY);
     expect(JSON.stringify(result)).not.toContain(LEASE_TOKEN);
+    expect(Object.keys(result.structuredOutcome)).toHaveLength(16);
+  });
+
+  it("preserves a passing candidate when Codex exits non-zero after editing", async () => {
+    const createCodeCandidate = vi.fn(async (input: Parameters<ControlPlaneClient["createCodeCandidate"]>[0]) => ({ id: input.id }));
+    const result = await runCodingTask({
+      workerRunId: WORKER_RUN_ID,
+      leaseToken: LEASE_TOKEN,
+      workspaceRoot: "/tmp/work",
+      openaiApiKey: API_KEY,
+      codingTaskTimeoutMs: 5_000,
+      client: baseClient({ createCodeCandidate }),
+      git: { run: async () => 0 },
+      gitStatus: { readPorcelain: async () => " M math.js\n" },
+      gitCapture: {
+        async readRevParse() { return "b".repeat(40); },
+        async stageAll() {},
+        async readUnifiedDiff() { return "diff --git a/math.js b/math.js\n"; },
+        async readChangedPaths() { return ["math.js"]; },
+      },
+      process: {
+        async run(input) {
+          if (input.command === CODEX_CLI_COMMAND) {
+            return { exitCode: 7, stdout: CODEX_USAGE_JSONL, stderr: "agent ended", timedOut: false };
+          }
+          return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+        },
+      },
+      now: () => 0,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.structuredOutcome.agentExitCode).toBe(7);
+    expect(result.structuredOutcome.testExitCode).toBe(0);
+    expect(result.structuredOutcome.failureReason).toContain("candidate preserved");
+    expect(createCodeCandidate).toHaveBeenCalledTimes(1);
+  });
+
+  it("charges the reservation conservatively when Codex usage is missing", async () => {
+    const recordBudgetEntry = vi.fn(async () => undefined);
+    const result = await runCodingTask({
+      workerRunId: WORKER_RUN_ID,
+      leaseToken: LEASE_TOKEN,
+      workspaceRoot: "/tmp/work",
+      openaiApiKey: API_KEY,
+      codingTaskTimeoutMs: 5_000,
+      client: baseClient({ recordBudgetEntry }),
+      git: { run: async () => 0 },
+      gitStatus: { readPorcelain: async () => " M math.js\n" },
+      gitCapture: {
+        async readRevParse() { return "c".repeat(40); },
+        async stageAll() {},
+        async readUnifiedDiff() { return "diff --git a/math.js b/math.js\n"; },
+        async readChangedPaths() { return ["math.js"]; },
+      },
+      process: {
+        async run(input) {
+          if (input.command === CODEX_CLI_COMMAND) {
+            return { exitCode: 0, stdout: "missing terminal usage event\n", stderr: "", timedOut: false };
+          }
+          return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+        },
+      },
+      now: () => 0,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.structuredOutcome.usageAccountingEstimated).toBe(true);
+    expect(result.structuredOutcome.estimatedCostUsd).toBe(0.25);
+    const entry = (recordBudgetEntry.mock.calls as unknown as readonly [readonly [Record<string, unknown>]])[0]![0];
+    expect(entry).toMatchObject({ amount: 0.25, description: "codex:gpt-5.6-luna:estimated" });
+  });
+
+  it("never exposes the Codex key to repository-controlled tests", async () => {
+    const testEnvs: NodeJS.ProcessEnv[] = [];
+    const result = await runCodingTask({
+      workerRunId: WORKER_RUN_ID,
+      leaseToken: LEASE_TOKEN,
+      workspaceRoot: "/tmp/work",
+      openaiApiKey: API_KEY,
+      codingTaskTimeoutMs: 5_000,
+      client: baseClient(),
+      git: { run: async () => 0 },
+      gitStatus: { readPorcelain: async () => " M math.js\n" },
+      gitCapture: {
+        async readRevParse() { return "d".repeat(40); },
+        async stageAll() {},
+        async readUnifiedDiff() { return "diff --git a/math.js b/math.js\n"; },
+        async readChangedPaths() { return ["math.js"]; },
+      },
+      process: {
+        async run(input) {
+          if (input.command === CODEX_CLI_COMMAND) {
+            expect(input.env?.CODEX_API_KEY).toBe(API_KEY);
+            return { exitCode: 0, stdout: CODEX_USAGE_JSONL, stderr: "", timedOut: false };
+          }
+          testEnvs.push(input.env ?? {});
+          return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+        },
+      },
+      now: () => 0,
+    });
+    expect(result.ok).toBe(true);
+    expect(testEnvs).toHaveLength(1);
+    expect(testEnvs[0]?.CODEX_API_KEY).toBeUndefined();
+    expect(testEnvs[0]?.OPENAI_API_KEY).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain(API_KEY);
   });
 });
 
 describe("runActuator coding-task integration", () => {
-  it("keeps heartbeats active during coding-task execution", async () => {
+  it("keeps heartbeats active during Codex execution", async () => {
     const heartbeats: number[] = [];
     let resolveCoding: (() => void) | undefined;
-    const codingDone = new Promise<void>((resolve) => {
-      resolveCoding = resolve;
-    });
-    const client: ControlPlaneClient = {
+    const codingDone = new Promise<void>((resolve) => { resolveCoding = resolve; });
+    const client = baseClient({
       async claim() {
         return {
           claimed: true,
@@ -273,9 +486,7 @@ describe("runActuator coding-task integration", () => {
           applied: true,
         };
       },
-      getTaskPacket: async () => samplePacket(),
-      createCodeCandidate: async (input) => ({ id: input.id }),
-    };
+    });
 
     const actuatorPromise = runActuator({
       config: {
@@ -289,27 +500,30 @@ describe("runActuator coding-task integration", () => {
         syntheticNoopDurationMs: 250,
         workspaceRoot: "/tmp/work",
         codingTaskTimeoutMs: 5_000,
-        cursorApiKey: API_KEY,
+        openaiApiKey: API_KEY,
       },
       client,
       timers: {
-        setInterval(handler, ms) {
-          return setInterval(handler, ms);
-        },
-        clearInterval(id) {
-          clearInterval(id as ReturnType<typeof setInterval>);
-        },
+        setInterval(handler, ms) { return setInterval(handler, ms); },
+        clearInterval(id) { clearInterval(id as ReturnType<typeof setInterval>); },
       },
       processRunner: {
         async run(input) {
-          if (input.command === CURSOR_CLI_COMMAND) {
+          if (input.command === CODEX_CLI_COMMAND) {
             await codingDone;
+            return { exitCode: 0, stdout: CODEX_USAGE_JSONL, stderr: "", timedOut: false };
           }
           return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
         },
       },
       gitRunner: { run: async () => 0 },
-      gitStatusReader: { readPorcelain: async () => "" },
+      gitStatusReader: { readPorcelain: async () => " M math.js\n" },
+      gitCaptureReader: {
+        async readRevParse() { return "e".repeat(40); },
+        async stageAll() {},
+        async readUnifiedDiff() { return "diff --git a/math.js b/math.js\n"; },
+        async readChangedPaths() { return ["math.js"]; },
+      },
     });
 
     await new Promise((resolve) => setTimeout(resolve, 50));

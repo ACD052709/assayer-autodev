@@ -5,6 +5,6 @@ export interface OrchestrationThresholds {
 }
 
 export const DEFAULT_ORCHESTRATION_THRESHOLDS: OrchestrationThresholds = {
-  maxRepairAttemptsPerTask: 2,
+  maxRepairAttemptsPerTask: 3,
   maxDispatchAssignments: 4,
 };

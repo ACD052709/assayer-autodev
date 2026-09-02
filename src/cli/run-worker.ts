@@ -37,9 +37,16 @@ async function main(argv: string[]): Promise<number> {
     ...(process.env.AUTODEV_CODING_TASK_TIMEOUT_MS !== undefined
       ? { AUTODEV_CODING_TASK_TIMEOUT_MS: process.env.AUTODEV_CODING_TASK_TIMEOUT_MS }
       : {}),
-    ...(process.env.CURSOR_API_KEY !== undefined ? { CURSOR_API_KEY: process.env.CURSOR_API_KEY } : {}),
+    ...(process.env.OPENAI_API_KEY !== undefined ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY } : {}),
+    ...(process.env.AUTODEV_TARGET_REPO_READ_TOKEN !== undefined
+      ? { AUTODEV_TARGET_REPO_READ_TOKEN: process.env.AUTODEV_TARGET_REPO_READ_TOKEN }
+      : {}),
   };
-  const secrets = [env.AUTODEV_SERVICE_TOKEN, env.CURSOR_API_KEY].filter(
+  const secrets = [
+    env.AUTODEV_SERVICE_TOKEN,
+    env.OPENAI_API_KEY,
+    env.AUTODEV_TARGET_REPO_READ_TOKEN,
+  ].filter(
     (value): value is string => value !== undefined && value.length > 0,
   );
   const logger = createSanitizingLogger(secrets);

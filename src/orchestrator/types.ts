@@ -11,6 +11,7 @@ import type { OrchestrationThresholds } from "./thresholds.js";
 export type OrchestrationPhase =
   | "planning"
   | "awaiting_work"
+  | "waiting_for_budget"
   | "worker_active"
   | "awaiting_verification"
   | "verifier_running"
@@ -21,6 +22,7 @@ export type OrchestrationPhase =
 
 export type OrchestrationActionKind =
   | "dispatch"
+  | "budget_wait"
   | "run_verifier"
   | "schedule_verifier"
   | "accept_verified_task"

@@ -189,6 +189,7 @@ export interface StateStore {
   initializeBudgetLedger(input: InitializeBudgetLedgerInput): BudgetLedger;
   getBudgetLedger(projectId: EntityId): BudgetLedger | undefined;
   addBudgetResource(input: import("../domain/budget.js").AddBudgetResourceInput): BudgetLedger;
+  increaseBudgetResource(input: import("../domain/budget.js").IncreaseBudgetResourceInput): BudgetLedger;
   recordBudgetEntry(input: CreateBudgetEntryInput): BudgetEntry;
   checkBudget(projectId: EntityId, category: BudgetLimit["category"]): import("../domain/budget.js").BudgetCheckResult;
 

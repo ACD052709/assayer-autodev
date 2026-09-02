@@ -10,6 +10,7 @@ import type {
   CreateBlockerInput,
   CreateBudgetEntryInput,
   AddBudgetResourceInput,
+  IncreaseBudgetResourceInput,
   CodeCandidate,
   CompleteCodeCandidatePromotionInput,
   CompletePromotionRunInput,
@@ -977,6 +978,31 @@ export class InMemoryStateStore implements StateStore {
     const updated: BudgetLedger = {
       ...existing,
       limits: [...existing.limits, ...limitsForBudgetResource(input)],
+      ...touchTimestamps(existing),
+    };
+    this.budgetLedgers.set(input.projectId, updated);
+    return updated;
+  }
+
+  increaseBudgetResource(input: IncreaseBudgetResourceInput): BudgetLedger {
+    const existing = this.budgetLedgers.get(input.projectId);
+    if (existing === undefined) {
+      throw new Error(`BudgetLedger not found for project: ${input.projectId}`);
+    }
+    const hard = existing.limits.find(
+      (limit) => limit.category === input.resourceType && limit.kind === "hard",
+    );
+    if (hard === undefined) {
+      throw new Error(`Budget resource not found: ${input.resourceType}`);
+    }
+    const limits = existing.limits.map((limit) =>
+      limit.category === input.resourceType && limit.kind === "hard"
+        ? { ...limit, maxAmount: limit.maxAmount + input.additionalAmount }
+        : limit,
+    );
+    const updated: BudgetLedger = {
+      ...existing,
+      limits,
       ...touchTimestamps(existing),
     };
     this.budgetLedgers.set(input.projectId, updated);

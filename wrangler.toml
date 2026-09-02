@@ -15,6 +15,7 @@ bucket_name = "assayer-autodev-evidence"
 
 [vars]
 ENVIRONMENT = "production"
+GITHUB_EXECUTION_MODE = "coding-task"
 
 [secrets]
 required = [ "AUTODEV_SERVICE_TOKEN" ]

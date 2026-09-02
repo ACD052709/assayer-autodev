@@ -10,6 +10,7 @@ describe("sanitizedCandidateEnv", () => {
       AUTODEV_SERVICE_TOKEN: "service-secret",
       CURSOR_API_KEY: "cursor-secret",
       OPENAI_API_KEY: "openai-secret",
+      CODEX_API_KEY: "codex-secret",
       GITHUB_TOKEN: "github-secret",
       SOME_PASSWORD: "password",
       VENDOR_AUTH_TOKEN: "auth-secret",
@@ -23,6 +24,7 @@ describe("sanitizedCandidateEnv", () => {
     expect(env.AUTODEV_SERVICE_TOKEN).toBeUndefined();
     expect(env.CURSOR_API_KEY).toBeUndefined();
     expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.CODEX_API_KEY).toBeUndefined();
     expect(env.GITHUB_TOKEN).toBeUndefined();
     expect(env.SOME_PASSWORD).toBeUndefined();
     expect(env.VENDOR_AUTH_TOKEN).toBeUndefined();

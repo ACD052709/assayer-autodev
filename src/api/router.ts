@@ -1059,6 +1059,107 @@ async function handleGetProjectBudget(
   return jsonResponse({ budget });
 }
 
+async function handlePostIncreaseProjectBudget(
+  request: Request,
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const projectId = assertEntityId(params.projectId, "projectId");
+  const budgetId = assertEntityId(params.budgetId, "budgetId");
+  await requireProject(deps.store, projectId);
+  let resourceType: ReturnType<typeof validators.budgetCategory>;
+  try {
+    resourceType = validators.budgetCategory(budgetId, "budgetId");
+  } catch {
+    throw new ApiError(404, "not_found", `Budget not found: ${budgetId}`);
+  }
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, ["additionalAmount"]);
+  const additionalAmount = assertFiniteNumber(body.additionalAmount, "additionalAmount");
+  if (additionalAmount <= 0) {
+    throw new ApiError(400, "validation_error", "Invalid additionalAmount", [
+      { field: "additionalAmount", message: "Must be greater than 0" },
+    ]);
+  }
+  const ledger = await deps.store.getBudgetLedger(projectId);
+  if (ledger === undefined || toBudgetResourceView(ledger, resourceType) === undefined) {
+    throw new ApiError(404, "not_found", `Budget not found: ${budgetId}`);
+  }
+  const updated = await deps.store.increaseBudgetResource({ projectId, resourceType, additionalAmount });
+  return jsonResponse({ budget: toBudgetResourceView(updated, resourceType) });
+}
+
+async function handlePostBudgetEntry(
+  request: Request,
+  params: Record<string, string>,
+  deps: ApiDependencies,
+): Promise<Response> {
+  const projectId = assertEntityId(params.projectId, "projectId");
+  await requireProject(deps.store, projectId);
+  const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
+  rejectUnknownKeys(body, ["id", "resourceType", "amount", "unit", "taskId", "workerRunId", "description"]);
+  const id = assertEntityId(body.id, "id");
+  const resourceType = validators.budgetCategory(body.resourceType, "resourceType");
+  const unit = assertNonEmptyString(body.unit, "unit");
+  if (unit !== expectedBudgetUnit(resourceType)) {
+    throw new ApiError(400, "validation_error", "Invalid unit", [
+      { field: "unit", message: `Must be ${expectedBudgetUnit(resourceType)} for ${resourceType}` },
+    ]);
+  }
+  const amount = assertFiniteNumber(body.amount, "amount");
+  if (amount < 0) {
+    throw new ApiError(400, "validation_error", "Invalid amount", [
+      { field: "amount", message: "Must be greater than or equal to 0" },
+    ]);
+  }
+  const taskId = assertOptionalEntityId(body.taskId, "taskId");
+  const workerRunId = assertOptionalEntityId(body.workerRunId, "workerRunId");
+  const description = assertOptionalNonEmptyString(body.description, "description");
+
+  if (taskId !== undefined) {
+    const task = await deps.store.getTask(taskId);
+    if (task === undefined || task.projectId !== projectId) {
+      throw new ApiError(400, "validation_error", "taskId does not belong to project");
+    }
+  }
+  if (workerRunId !== undefined) {
+    const run = await deps.store.getWorkerRun(workerRunId);
+    if (run === undefined || run.projectId !== projectId) {
+      throw new ApiError(400, "validation_error", "workerRunId does not belong to project");
+    }
+  }
+
+  const ledger = await deps.store.getBudgetLedger(projectId);
+  if (ledger === undefined || toBudgetResourceView(ledger, resourceType) === undefined) {
+    throw new ApiError(409, "budget_unavailable", `Budget is not configured for ${resourceType}`);
+  }
+  const existing = ledger.entries.find((entry) => entry.id === id);
+  if (existing !== undefined) {
+    const same =
+      existing.category === resourceType &&
+      existing.amount === amount &&
+      existing.unit === unit &&
+      existing.taskId === taskId &&
+      existing.workerRunId === workerRunId;
+    if (!same) {
+      throw new ApiError(409, "conflict", `Budget entry already exists: ${id}`);
+    }
+    return jsonResponse({ entry: existing, created: false });
+  }
+
+  const entry = await deps.store.recordBudgetEntry({
+    id,
+    projectId,
+    category: resourceType,
+    amount,
+    unit,
+    ...(taskId !== undefined ? { taskId } : {}),
+    ...(workerRunId !== undefined ? { workerRunId } : {}),
+    ...(description !== undefined ? { description } : {}),
+  });
+  return jsonResponse({ entry, created: true }, 201);
+}
+
 async function handlePostProjectDispatch(
   request: Request,
   params: Record<string, string>,
@@ -1076,7 +1177,11 @@ async function handlePostProjectDispatch(
     const result = await dispatcherFor(deps).dispatch(projectId, {
       ...(maxAssignments !== undefined ? { maxAssignments } : {}),
     });
-    return jsonResponse({ assignments: result.assignments, launches: result.launches });
+    return jsonResponse({
+      assignments: result.assignments,
+      launches: result.launches,
+      ...(result.budgetBlocked !== undefined ? { budgetBlocked: result.budgetBlocked } : {}),
+    });
   } catch (error) {
     if (error instanceof DispatchValidationError) {
       throw new ApiError(400, "validation_error", `Invalid ${error.field}`, [
@@ -1806,6 +1911,18 @@ const routes: readonly {
     pattern: "/api/projects/:projectId/budgets/:budgetId",
     policy: READ_POLICY,
     handler: (_request, params, deps) => handleGetProjectBudget(params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:projectId/budgets/:budgetId/increase",
+    policy: MASTER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostIncreaseProjectBudget(request, params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:projectId/budget-entries",
+    policy: WORKER_WRITE_POLICY,
+    handler: (request, params, deps) => handlePostBudgetEntry(request, params, deps),
   },
   {
     method: "POST",

@@ -11,6 +11,7 @@ import type { AsyncStateStore } from "../state/async-store.js";
 import { nextActiveTaskIds } from "./active-tasks.js";
 import {
   authorizeLlmBudget,
+  authorizeOptionalLlmCostBudget,
   DEFAULT_MASTER_CALL_TOKEN_ESTIMATE,
   estimateMasterCallTokens,
   type MasterCallTokenEstimate,
@@ -89,6 +90,16 @@ export class MasterOrchestrator {
       );
     }
 
+    const costAuthorization = authorizeOptionalLlmCostBudget(input.budget);
+    if (!costAuthorization.allowed) {
+      return this.persistBlockedRun(
+        request,
+        `Budget blocked master call: ${costAuthorization.reason}`,
+        [costAuthorization.reason],
+        "none",
+      );
+    }
+
     let modelOutput: unknown;
     let modelId = "unknown";
     let inputTokens: number | undefined;
@@ -123,6 +134,21 @@ export class MasterOrchestrator {
           description: "master_model_call",
         });
       }
+    }
+
+    const modelCost = this.costFields(modelId, inputTokens, outputTokens, cachedInputTokens);
+    const hasDollarBudget = input.budget?.limits.some(
+      (limit) => limit.category === "llm_cost_usd" && limit.kind === "hard",
+    ) === true;
+    if (hasDollarBudget && modelCost.estimatedCost !== undefined) {
+      await this.store.recordBudgetEntry({
+        id: this.ids.next("budg"),
+        projectId: request.projectId,
+        category: "llm_cost_usd",
+        amount: modelCost.estimatedCost,
+        unit: "usd",
+        description: `master_model_call:${modelId}`,
+      });
     }
 
     let decision;
@@ -170,7 +196,7 @@ export class MasterOrchestrator {
       await this.syncActiveTaskIds(request.projectId, createdTaskIds);
     }
 
-    const cost = this.costFields(modelId, inputTokens, outputTokens, cachedInputTokens);
+    const cost = modelCost;
 
     const run = await this.store.createMasterRun({
       id: this.ids.next("mrun"),
