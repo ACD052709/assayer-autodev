@@ -77,6 +77,33 @@ function sanitizeFailureReason(value: string): string {
   return trimmed.length > 240 ? trimmed.slice(0, 240) : trimmed;
 }
 
+function summarizeTrustedTestFailure(
+  exitCode: number,
+  stdout: string,
+  stderr: string,
+): string {
+  const diagnostic = [
+    stderr.trim().length > 0 ? `stderr: ${stderr.trim()}` : "",
+    stdout.trim().length > 0 ? `stdout: ${stdout.trim()}` : "",
+  ]
+    .filter((value) => value.length > 0)
+    .join(" | ")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (diagnostic.length === 0) {
+    return `Trusted repository tests failed (exit ${exitCode}); no test output was captured`;
+  }
+
+  const bounded =
+    diagnostic.length > 1200
+      ? `...[last 1200 chars] ${diagnostic.slice(-1200)}`
+      : diagnostic;
+
+  return `Trusted repository tests failed (exit ${exitCode}): ${bounded}`;
+}
+
 const ZERO_USAGE: CodexUsage = {
   inputTokens: 0,
   cachedInputTokens: 0,
@@ -351,7 +378,11 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
   let failureReason = "";
   let errorCode: string | undefined;
   if (!testsPassed) {
-    failureReason = "Trusted repository tests failed";
+    failureReason = summarizeTrustedTestFailure(
+      testResult.exitCode,
+      testResult.stdout,
+      testResult.stderr,
+    );
     errorCode = "REPOSITORY_TESTS_FAILED";
   } else if (!hasChanges) {
     failureReason = "Coding task produced no code changes to verify";

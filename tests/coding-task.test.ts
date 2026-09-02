@@ -283,6 +283,48 @@ describe("runCodingTask", () => {
     expect(processRun).not.toHaveBeenCalled();
   });
 
+  it("includes bounded trusted-test output in repository-test failures", async () => {
+    const result = await runCodingTask({
+      workerRunId: WORKER_RUN_ID,
+      leaseToken: LEASE_TOKEN,
+      workspaceRoot: "/tmp/work",
+      openaiApiKey: API_KEY,
+      codingTaskTimeoutMs: 5_000,
+      client: baseClient(),
+      git: { run: async () => 0 },
+      gitStatus: { readPorcelain: async () => " M math.js\n" },
+      process: {
+        async run(input) {
+          if (input.command === CODEX_CLI_COMMAND) {
+            return {
+              exitCode: 0,
+              stdout: CODEX_USAGE_JSONL,
+              stderr: "",
+              timedOut: false,
+            };
+          }
+
+          return {
+            exitCode: 1,
+            stdout: "TAP version 13\nnot ok 1 - add correctly adds two numbers\nexpected 5 but received -1\n",
+            stderr: "AssertionError: -1 !== 5\n",
+            timedOut: false,
+          };
+        },
+      },
+      now: () => 0,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe("REPOSITORY_TESTS_FAILED");
+    expect(result.summary).toContain("Trusted repository tests failed (exit 1)");
+    expect(result.summary).toContain("AssertionError: -1 !== 5");
+    expect(result.summary).toContain("expected 5 but received -1");
+    expect(result.structuredOutcome.testExitCode).toBe(1);
+    expect(JSON.stringify(result)).not.toContain(API_KEY);
+    expect(JSON.stringify(result)).not.toContain(LEASE_TOKEN);
+  });
+
   it("runs Codex then trusted tests and records exact model usage cost", async () => {
     const processCalls: { command: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }[] = [];
     const expectedCheckout = isolatedCheckoutDirectory("/tmp/work", WORKER_RUN_ID);
