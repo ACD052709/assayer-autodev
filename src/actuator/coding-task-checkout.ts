@@ -91,11 +91,49 @@ export async function prepareIsolatedCheckout(
     return { checkoutDir };
   }
 
+  const targetRef = input.packet.targetRef;
+
+  if (targetRef !== undefined && /^[0-9a-f]{40}$/i.test(targetRef)) {
+    let exitCode = await input.git.run(
+      [
+        "clone",
+        "--no-checkout",
+        buildCloneUrl(input.packet.targetRepository),
+        checkoutDir,
+      ],
+      undefined,
+      gitAuthEnv,
+    );
+    if (exitCode !== 0) {
+      throw new Error("Failed to clone target repository checkout");
+    }
+
+    exitCode = await input.git.run(
+      ["fetch", "--depth", "1", "origin", targetRef],
+      checkoutDir,
+      gitAuthEnv,
+    );
+    if (exitCode !== 0) {
+      throw new Error("Failed to fetch target repository commit");
+    }
+
+    exitCode = await input.git.run(
+      ["checkout", "--detach", targetRef],
+      checkoutDir,
+    );
+    if (exitCode !== 0) {
+      throw new Error("Failed to checkout target repository commit");
+    }
+
+    return { checkoutDir };
+  }
+
   const cloneArgs = ["clone", "--depth", "1"];
-  if (input.packet.targetRef !== undefined && input.packet.targetRef.length > 0) {
-    cloneArgs.push("--branch", input.packet.targetRef);
+  if (targetRef !== undefined && targetRef.length > 0) {
+    cloneArgs.push("--branch", targetRef);
   }
   cloneArgs.push(buildCloneUrl(input.packet.targetRepository), checkoutDir);
+
   const exitCode = await input.git.run(cloneArgs, undefined, gitAuthEnv);
   if (exitCode !== 0) {
     throw new Error("Failed to clone target repository checkout");
