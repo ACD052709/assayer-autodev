@@ -37,7 +37,7 @@ export function reasoningEffortForCodingModel(
  * - network disabled inside the model-controlled shell
  * - approval prompts disabled so unattended CI fails within the sandbox instead of escalating
  * - standard service tier pinned so pricing cannot silently inherit Fast/Priority routing
- * - code-mode host and multi-agent runtimes disabled to avoid hidden tool/subagent multiplication
+ * - code-mode host remains enabled for required workspace tools; multi-agent runtimes remain disabled
  * - default secret-name exclusions enabled for model-controlled subprocesses
  * - user config and exec-policy rules ignored for deterministic CI behavior
  * - ephemeral session data
@@ -61,8 +61,6 @@ export function buildCodexCliInvocation(input: BuildCodexCliInvocationInput): Co
       "--ignore-rules",
       "--disable",
       "code_mode",
-      "--disable",
-      "code_mode_host",
       "--disable",
       "multi_agent",
       "--disable",

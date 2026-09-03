@@ -149,8 +149,6 @@ describe("coding-task prompt and Codex CLI", () => {
       "--disable",
       "code_mode",
       "--disable",
-      "code_mode_host",
-      "--disable",
       "multi_agent",
       "--disable",
       "multi_agent_v2",
