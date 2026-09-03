@@ -132,6 +132,7 @@ export async function runActuator(options: RunActuatorOptions): Promise<Actuator
           gitStatus: options.gitStatusReader ?? createGitStatusReader(),
           gitCapture: options.gitCaptureReader ?? createGitCaptureReader(),
           signal: workAbort.signal,
+          logger,
         });
         await heartbeat.stop();
         if (ownershipLost) {

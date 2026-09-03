@@ -25,7 +25,7 @@ import {
   type CodexUsage,
 } from "./codex-cli.js";
 import type { ProcessRunner } from "./process-runner.js";
-import type { ControlPlaneClient } from "./types.js";
+import type { ControlPlaneClient, ActuatorLogger } from "./types.js";
 import { CODING_TASK_KIND } from "./types.js";
 import { sanitizedCandidateEnv } from "./subprocess-env.js";
 import { detectTargetSetupCommand } from "./target-setup.js";
@@ -44,6 +44,7 @@ export interface CodingTaskRunInput {
   readonly gitCapture?: GitCaptureReader;
   readonly signal?: AbortSignal;
   readonly now?: () => number;
+  readonly logger?: ActuatorLogger;
 }
 
 export interface CodingTaskStructuredOutcome extends Readonly<Record<string, string | number | boolean>> {
@@ -309,6 +310,14 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
     },
   });
 
+  input.logger?.info("Codex execution evidence", {
+    phase: "initial",
+    exitCode: agentResult.exitCode,
+    timedOut: agentResult.timedOut,
+    stdoutTail: agentResult.stdout.length > 24000 ? agentResult.stdout.slice(-24000) : agentResult.stdout,
+    stderrTail: agentResult.stderr.length > 12000 ? agentResult.stderr.slice(-12000) : agentResult.stderr,
+  });
+
   const usage = parseCodexUsage(agentResult.stdout);
   // If Codex is interrupted before emitting its terminal usage event, charge the
   // reservation internally rather than silently undercounting. This is deliberately
@@ -400,6 +409,14 @@ export async function runCodingTask(input: CodingTaskRunInput): Promise<CodingTa
           ...sanitizedCandidateEnv(),
           CODEX_API_KEY: input.openaiApiKey,
         },
+      });
+
+      input.logger?.info("Codex execution evidence", {
+        phase: "repair",
+        exitCode: repairAgentResult.exitCode,
+        timedOut: repairAgentResult.timedOut,
+        stdoutTail: repairAgentResult.stdout.length > 24000 ? repairAgentResult.stdout.slice(-24000) : repairAgentResult.stdout,
+        stderrTail: repairAgentResult.stderr.length > 12000 ? repairAgentResult.stderr.slice(-12000) : repairAgentResult.stderr,
       });
 
       finalAgentResult = repairAgentResult;
