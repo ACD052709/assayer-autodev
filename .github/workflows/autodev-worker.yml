@@ -62,6 +62,27 @@ jobs:
       - name: Verify Codex CLI
         run: codex --version
 
+      - name: Enable Linux user namespaces for Codex sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
+          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
+            echo "Enabling kernel.unprivileged_userns_clone for Codex bubblewrap."
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+
+          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
+          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
+            echo "Disabling Ubuntu AppArmor unprivileged-userns gate for Codex bubblewrap."
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Verify Codex Linux sandbox
+        shell: bash
+        run: codex sandbox linux -- /bin/true
+
       - name: Run worker actuator
         env:
           AUTODEV_SERVICE_TOKEN: ${{ secrets.AUTODEV_SERVICE_TOKEN }}
