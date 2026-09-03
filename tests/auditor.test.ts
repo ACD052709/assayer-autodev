@@ -289,9 +289,12 @@ describe("auditor API", () => {
 
     const run = await request(router, "POST", `/api/projects/${PROJECT_ID}/audit`);
     expect(run.status).toBe(200);
-    const runBody = (await run.json()) as { activeCount: number; findings: { ruleCode: string }[] };
+    const runBody = (await run.json()) as { activeCount: number; findings: { ruleCode: string }[]; lifecycles: { taskId: string; result: { status: string } }[] };
     expect(runBody.activeCount).toBe(1);
     expect(runBody.findings[0]!.ruleCode).toBe("DUPLICATE_ACTIVE_WORK");
+    expect(runBody.lifecycles).toHaveLength(1);
+    expect(runBody.lifecycles[0]!.taskId).toBe(TASK_ID);
+    expect(runBody.lifecycles[0]!.result.status).toBe("INCOMPLETE_EVIDENCE");
 
     const list = await request(router, "GET", `/api/projects/${PROJECT_ID}/audit-findings`);
     expect(list.status).toBe(200);

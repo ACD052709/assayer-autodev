@@ -65,6 +65,7 @@ import { buildWorkerTaskPacket } from "../worker/task-packet.js";
 import { hashLeaseToken } from "../executor/lease.js";
 import { nowIso } from "../domain/common.js";
 import { runProjectAudit } from "../auditor/index.js";
+import { reconstructProjectTaskLifecycles } from "../auditor/persisted-lifecycle.js";
 import type { AuditFindingStatus } from "../domain/audit-finding.js";
 import type { createAutoDevOrchestrator } from "../orchestrator/index.js";
 import { parseBrowserTestSpec } from "../verifier/browser-spec.js";
@@ -1411,6 +1412,7 @@ async function handlePostProjectAudit(
   const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
   rejectUnknownKeys(body, []);
   const result = await runProjectAudit(deps.store, projectId, { now: nowIso() });
+  const lifecycles = await reconstructProjectTaskLifecycles(deps.store, projectId);
   const activeFindings = result.findings.filter((finding) => finding.status === "active");
   return jsonResponse({
     projectId,
@@ -1418,6 +1420,7 @@ async function handlePostProjectAudit(
     activeCount: result.activeCount,
     resolvedCount: result.resolvedCount,
     findings: activeFindings,
+    lifecycles,
   });
 }
 
