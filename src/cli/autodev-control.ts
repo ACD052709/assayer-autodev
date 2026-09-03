@@ -103,7 +103,7 @@ async function runPreflight(): Promise<void> {
   }
 
   const authProbe = await fetch(
-    `${CONTROL_PLANE_URL}/api/projects/__autodev-control-preflight__/state`,
+    `${CONTROL_PLANE_URL}/api/projects/proj-autodev-control-preflight/state`,
     { headers: authHeaders() },
   );
 
