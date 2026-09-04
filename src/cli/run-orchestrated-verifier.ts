@@ -139,8 +139,8 @@ async function main(argv: string[]): Promise<number> {
       testCaseIdsBySpecId: { [options.testCaseId]: options.testCaseId },
       result,
       skipCreateVerifierRun: true,
-      nextEvidenceId: (caseId, kind) => `ev-${options.verifierRunId}-${caseId}-${kind}`,
-      nextTestResultId: (caseId) => `tr-${options.verifierRunId}-${caseId}`,
+      nextEvidenceId: (_caseId, kind) => `ev-${options.verifierRunId}-${kind}`,
+      nextTestResultId: (_caseId) => `tr-${options.verifierRunId}`,
     });
 
     return result.outcome === "PASS" ? 0 : 1;
