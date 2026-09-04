@@ -94,7 +94,15 @@ export function createVerifierControlPlaneClient(
         typeof (error as { message?: unknown }).message === "string"
           ? (error as { message: string }).message
           : `Verifier API request failed (${response.status})`;
-      throw new Error(message);
+      const errorCode =
+        typeof error === "object" &&
+        error !== null &&
+        typeof (error as { code?: unknown }).code === "string"
+          ? (error as { code: string }).code
+          : undefined;
+      throw new Error(
+        `Verifier API ${method} ${path} failed (${response.status}${errorCode ? ` ${errorCode}` : ""}): ${message}`,
+      );
     }
     return payload;
   }
