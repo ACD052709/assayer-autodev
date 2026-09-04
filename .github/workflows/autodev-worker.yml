@@ -81,7 +81,7 @@ jobs:
 
       - name: Verify Codex Linux sandbox
         shell: bash
-        run: codex sandbox linux /bin/true
+        run: codex sandbox /bin/true
 
       - name: Run worker actuator
         env:
