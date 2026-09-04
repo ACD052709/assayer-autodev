@@ -1,4 +1,5 @@
 import { LIFECYCLE_EVENTS } from "../executor/events.js";
+import { parseRepairTaskContext } from "../orchestrator/repair-context.js";
 import type { AsyncStateStore } from "../state/async-store.js";
 import type { StateStore } from "../state/store.js";
 import {
@@ -79,6 +80,9 @@ export async function reconstructProjectTaskLifecycles(
     workerRuns.map(async (run) => [run.id, await store.listWorkerEvents(run.id)] as const),
   );
   const workerEventsByRunId = new Map(workerEventEntries);
+  const repairContextByTaskId = new Map(
+    tasks.map((task) => [task.id, parseRepairTaskContext(task.description)] as const),
+  );
 
   return tasks.map((task) => {
     const ranked: RankedEvidence[] = [];
@@ -248,6 +252,70 @@ export async function reconstructProjectTaskLifecycles(
       );
     }
 
+    const repairTasks = tasks
+      .map((repairTask) => ({
+        task: repairTask,
+        context: repairContextByTaskId.get(repairTask.id),
+      }))
+      .filter((entry) => entry.context?.originalTaskId === task.id)
+      .sort((a, b) => (a.context?.attempt ?? 0) - (b.context?.attempt ?? 0));
+
+    for (const repair of repairTasks) {
+      for (const run of workerRuns.filter((item) => item.taskId === repair.task.id)) {
+        if (run.startedAt !== undefined) {
+          add(
+            run.startedAt,
+            75,
+            "worker_run",
+            run.id,
+            {
+              id: `${run.id}:repair-started`,
+              type: "REPAIR_STARTED",
+              taskId: task.id,
+              attemptId: run.id,
+            },
+            supportingWorkerEventIds(
+              workerEventsByRunId.get(run.id) ?? [],
+              LIFECYCLE_EVENTS.STARTED,
+            ),
+          );
+        }
+      }
+
+      for (const candidate of candidates.filter((item) => item.taskId === repair.task.id)) {
+        // A durable repair candidate proves the bounded repair completed
+        // far enough to produce test-passing candidate work.
+        add(
+          candidate.createdAt,
+          80,
+          "code_candidate",
+          candidate.id,
+          {
+            id: `${candidate.id}:repair-completed`,
+            type: "REPAIR_COMPLETED",
+            taskId: task.id,
+            attemptId: candidate.workerRunId,
+          },
+        );
+
+        add(
+          candidate.createdAt,
+          85,
+          "code_candidate",
+          candidate.id,
+          {
+            id: candidate.id,
+            type: "ARTIFACT_CREATED",
+            taskId: task.id,
+            attemptId: candidate.workerRunId,
+            codeCandidateId: candidate.id,
+            ...(candidate.parentCandidateId !== undefined
+              ? { parentCodeCandidateId: candidate.parentCandidateId }
+              : {}),
+          },
+        );
+      }
+    }
     for (const verifier of verifierRuns.filter((item) => item.taskId === task.id)) {
       if (verifier.startedAt !== undefined) {
         add(
