@@ -2060,7 +2060,7 @@ export class D1StateStore implements AsyncStateStore {
         `INSERT INTO evidence
          (id, project_id, task_id, worker_run_id, verifier_run_id, git_revision_id, deployment_id,
           kind, label, uri, content_ref, mime_type, metadata_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         item.id,
