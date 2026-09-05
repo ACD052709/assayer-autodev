@@ -15,7 +15,8 @@
     "orchestrated-verifier": "tsx src/cli/run-orchestrated-verifier.ts",
     "orchestrated-promotion": "tsx src/cli/run-orchestrated-promotion.ts",
     "validate:local": "npm run typecheck && npm run typecheck:worker && npm test && npm run worker:validate",
-    "autodev:control": "tsx src/cli/autodev-control.ts"
+    "autodev:control": "tsx src/cli/autodev-control.ts",
+    "autodev:repair-control": "tsx src/cli/autodev-repair-control.ts"
   },
   "engines": {
     "node": ">=20"
