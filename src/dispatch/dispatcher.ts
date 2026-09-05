@@ -39,6 +39,8 @@ export interface WorkerDispatcherOptions {
 
 export interface DispatchRequest {
   readonly maxAssignments?: number;
+  /** Skip the worker launch bridge when explicitly false. Defaults to normal launching. */
+  readonly launchWorkers?: boolean;
 }
 
 export interface DispatchBudgetBlock {
@@ -198,9 +200,14 @@ export class WorkerDispatcher {
       assignments.push(assignment);
     }
 
-    const launches = await Promise.all(
-      assignments.map((assignment) => this.launchBridge.launch(assignment.workerRun.id)),
-    );
+    const launches =
+      request.launchWorkers === false
+        ? []
+        : await Promise.all(
+            assignments.map((assignment) =>
+              this.launchBridge.launch(assignment.workerRun.id),
+            ),
+          );
 
     return { assignments, launches, ...(budgetBlocked !== undefined ? { budgetBlocked } : {}) };
   }

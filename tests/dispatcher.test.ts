@@ -153,6 +153,49 @@ describe("WorkerDispatcher", () => {
     expect(result.assignments.map((a) => a.task.id)).toEqual(ordered.map((t) => t.id));
   });
 
+  it("can assign without launching while preserving normal launch behavior", async () => {
+    const launches: string[] = [];
+
+    const controlledDispatcher = createWorkerDispatcher({
+      store: asAsyncStore(syncStore),
+      idFactory: createSequentialIdFactory(),
+      launchBridge: {
+        async launch(workerRunId) {
+          launches.push(workerRunId);
+          return { workerRunId, launched: true };
+        },
+      },
+    });
+
+    await createTask("task-launch-normal");
+
+    const normal = await controlledDispatcher.dispatch(PROJECT_A, {
+      maxAssignments: 1,
+    });
+
+    expect(normal.assignments).toHaveLength(1);
+    expect(normal.launches).toHaveLength(1);
+    expect(launches).toEqual([normal.assignments[0]!.workerRun.id]);
+
+    await createTask("task-launch-suppressed");
+
+    const suppressed = await controlledDispatcher.dispatch(PROJECT_A, {
+      maxAssignments: 1,
+      launchWorkers: false,
+    });
+
+    expect(suppressed.assignments).toHaveLength(1);
+    expect(suppressed.assignments[0]!.task.status).toBe(
+      DISPATCH_ASSIGNED_STATUS,
+    );
+    expect(
+      syncStore.getTask("task-launch-suppressed")?.assignedWorkerRunId,
+    ).toBe(suppressed.assignments[0]!.workerRun.id);
+
+    expect(suppressed.launches).toEqual([]);
+    expect(launches).toHaveLength(1);
+  });
+
   it("respects maxAssignments", async () => {
     await createTask("task-1");
     await createTask("task-2");

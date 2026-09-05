@@ -1169,14 +1169,16 @@ async function handlePostProjectDispatch(
   const projectId = assertEntityId(params.projectId, "projectId");
   await requireProject(deps.store, projectId);
   const body = await readJsonBody(request, MAX_JSON_BODY_BYTES);
-  rejectUnknownKeys(body, ["maxAssignments"]);
+  rejectUnknownKeys(body, ["maxAssignments", "launchWorkers"]);
   const maxAssignments = assertOptionalInteger(body.maxAssignments, "maxAssignments");
+  const launchWorkers = assertOptionalBoolean(body.launchWorkers, "launchWorkers");
   try {
     if (maxAssignments !== undefined) {
       normalizeMaxAssignments(maxAssignments);
     }
     const result = await dispatcherFor(deps).dispatch(projectId, {
       ...(maxAssignments !== undefined ? { maxAssignments } : {}),
+      ...(launchWorkers !== undefined ? { launchWorkers } : {}),
     });
     return jsonResponse({
       assignments: result.assignments,

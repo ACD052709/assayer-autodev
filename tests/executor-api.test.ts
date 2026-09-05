@@ -71,6 +71,44 @@ describe("Worker-run lifecycle API", () => {
     return body.assignments[0]!.workerRun.id;
   }
 
+  it("accepts explicit no-launch dispatch and validates the flag", async () => {
+    const dispatch = await request(
+      router,
+      "POST",
+      `/api/projects/${PROJECT_ID}/dispatch`,
+      {
+        maxAssignments: 1,
+        launchWorkers: false,
+      },
+    );
+
+    expect(dispatch.status).toBe(200);
+
+    const body = (await dispatch.json()) as {
+      assignments: {
+        workerRun: { id: string };
+        task: { status: string };
+      }[];
+      launches: unknown[];
+    };
+
+    expect(body.assignments).toHaveLength(1);
+    expect(body.assignments[0]!.task.status).toBe("assigned");
+    expect(body.launches).toEqual([]);
+
+    const invalid = await request(
+      router,
+      "POST",
+      `/api/projects/${PROJECT_ID}/dispatch`,
+      {
+        maxAssignments: 1,
+        launchWorkers: "no",
+      },
+    );
+
+    expect(invalid.status).toBe(400);
+  });
+
   it("claims, succeeds, and rejects unknown fields", async () => {
     const runId = await dispatchedRunId();
     const claim = await request(router, "POST", `/api/worker-runs/${runId}/claim`, {
